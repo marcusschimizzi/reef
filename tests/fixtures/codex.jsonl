@@ -1,0 +1,3 @@
+{"type":"progress","message":"starting"}
+{"type":"needs_input","question":"Pick","options":["A","B"]}
+{"type":"completed","result":"done"}

@@ -1,0 +1,3 @@
+{"type":"progress","message":"starting"}
+{"type":"needs_input","question":"Continue?","options":["yes","no"]}
+{"type":"completed","result":"done"}
