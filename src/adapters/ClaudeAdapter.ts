@@ -1,16 +1,31 @@
 import { spawn } from "node:child_process";
 import { makeEvent } from "../events.js";
 import type { AgentEvent } from "../types.js";
-import type { AdapterSpawnOptions, AgentAdapter } from "./types.js";
+import type { AdapterResumeOptions, AdapterSpawnOptions, AgentAdapter } from "./types.js";
 import { parseJsonLines } from "./jsonl.js";
 
 export class ClaudeAdapter implements AgentAdapter {
   name = "claude";
+  canResume = true;
 
   spawn(options: AdapterSpawnOptions) {
     const args = ["-p", options.task, "-y", "--output-format", "stream-json"];
     return spawn("claude", args, { cwd: options.cwd, stdio: ["pipe", "pipe", "pipe"] });
   }
+
+  resume(options: AdapterResumeOptions) {
+    const args = [
+      "--session-id",
+      options.sessionId,
+      "-p",
+      options.task,
+      "-y",
+      "--output-format",
+      "stream-json"
+    ];
+    return spawn("claude", args, { cwd: options.cwd, stdio: ["pipe", "pipe", "pipe"] });
+  }
+
 
   async *parseOutput(stream: NodeJS.ReadableStream): AsyncIterable<AgentEvent> {
     yield* parseJsonLines(stream, (payload) => {

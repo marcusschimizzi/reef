@@ -1,4 +1,4 @@
-export type AgentType = "claude" | "codex";
+export type AgentType = "claude" | "codex" | "opencode";
 export type SpawnMode = "headless" | "headful";
 
 export type JobStatus =
@@ -14,6 +14,7 @@ export interface Job {
   mode: SpawnMode;
   task: string;
   cwd: string;
+  sessionId?: string;
   status: JobStatus;
   startedAt: string;
   completedAt?: string;

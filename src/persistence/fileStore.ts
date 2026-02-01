@@ -16,6 +16,10 @@ export class FileStore {
 
   async save(snapshot: StateSnapshot): Promise<void> {
     await fs.mkdir(dirname(this.path), { recursive: true });
-    await fs.writeFile(this.path, JSON.stringify(snapshot, null, 2), "utf8");
+    // Atomic write (best-effort): write to tmp then rename.
+    // This prevents partial/corrupt state files if the process is killed mid-write.
+    const tmpPath = `${this.path}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+    await fs.writeFile(tmpPath, JSON.stringify(snapshot, null, 2), "utf8");
+    await fs.rename(tmpPath, this.path);
   }
 }

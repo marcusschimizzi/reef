@@ -4,7 +4,7 @@
 Build a stdio MCP server in TypeScript/Node.js that spawns and manages coding agents via adapters, exposes spawn/status/send/output/kill tools, normalizes events, and persists thin state snapshots for recovery.
 
 ## Scope
-- Adapters: Claude Code + Codex (Phase 1).
+- Adapters: Claude Code + Codex + OpenCode (Phase 1).
 - Transport: MCP over stdio (JSON-RPC 2.0).
 - State: in-memory with thin file snapshot persistence at `./.reef/state.json`.
 - Persistence is recovery-only (no process resurrection).
@@ -98,7 +98,7 @@ interface AgentEvent {
 - Snapshot writes are best-effort.
 
 ## Testing Strategy (Phase 1)
-- Adapter parsing tests with fixtures (Claude stream-json, Codex JSONL).
+- Adapter parsing tests with fixtures (Claude stream-json, Codex JSONL, OpenCode JSONL).
 - AgentManager tests for state transitions, awaiting_input behavior, send clearing, and persistence pruning at 20.
 - MCP tool smoke tests through in-memory stdio harness (no external binaries).
 

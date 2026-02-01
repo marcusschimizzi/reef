@@ -10,4 +10,8 @@ export class AdapterRegistry {
   get(name: string): AgentAdapter | undefined {
     return this.adapters.get(name);
   }
+
+  list(): string[] {
+    return [...this.adapters.keys()];
+  }
 }

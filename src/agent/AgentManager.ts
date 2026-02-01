@@ -1,4 +1,5 @@
 import type { ChildProcess } from "node:child_process";
+import type { Readable } from "node:stream";
 import { DEFAULT_STATE_PATH, MAX_COMPLETED } from "../config.js";
 import { makeEvent } from "../events.js";
 import type { AgentType, Job } from "../types.js";
@@ -6,6 +7,7 @@ import type { AdapterRegistry } from "../adapters/registry.js";
 import { FileStore } from "../persistence/fileStore.js";
 import { EventStore } from "./EventStore.js";
 import { nextId } from "./ids.js";
+import { mergeStreams } from "./mergeStreams.js";
 
 export class AgentManager {
   private readonly jobs = new Map<string, Job>();
@@ -74,6 +76,16 @@ export class AgentManager {
         agentId: id,
         timestamp: event.timestamp ?? new Date().toISOString()
       };
+      // If the underlying agent reports a persistent session id (e.g. Claude Code),
+      // capture it on the Job so follow-ups can resume the same context.
+      const job = this.jobs.get(id);
+      const payload: any = (normalized as any)?.payload ?? {};
+      const sessionId = payload.session_id ?? payload.thread_id ?? payload.sessionID ?? payload.sessionId;
+      if (job && typeof sessionId === "string" && sessionId.length > 0 && job.sessionId !== sessionId) {
+        job.sessionId = sessionId;
+        this.saveSnapshot();
+      }
+
       if (normalized.type === "needs_input") {
         this.markAwaitingInput(
           id,
@@ -93,8 +105,12 @@ export class AgentManager {
     const job = this.createJob(agent, mode, task, cwd);
     const proc = adapter.spawn({ task, cwd, mode });
     this.attachProcess(job.id, proc);
-    if (proc.stdout) {
-      void this.consumeEvents(job.id, adapter.parseOutput(proc.stdout));
+    const outputStreams = [proc.stdout, proc.stderr].filter(
+      (stream): stream is Readable => stream !== null
+    );
+    if (outputStreams.length > 0) {
+      const merged = mergeStreams(outputStreams);
+      void this.consumeEvents(job.id, adapter.parseOutput(merged));
     }
     proc.on("exit", (code) => {
       const status = code === 0 ? "completed" : "error";
@@ -104,13 +120,60 @@ export class AgentManager {
   }
 
   send(agentId: string, message: string): void {
-    const job = this.jobs.get(agentId);
+    // Allow sending to both active and recently completed jobs.
+    // For resume-capable adapters, a "completed" job can be continued by spawning
+    // a new process bound to the same persisted session id.
+    const completedIndex = this.completed.findIndex((job) => job.id === agentId);
+    const job = this.jobs.get(agentId) ?? (completedIndex >= 0 ? this.completed[completedIndex] : undefined);
     if (!job) return;
+
     const adapter = this.adapters.get(job.agent);
+    if (!adapter) return;
+
+    // If this job is currently in completed history, move it back to active.
+    if (completedIndex >= 0) {
+      this.completed.splice(completedIndex, 1);
+      job.status = "running";
+      delete (job as any).completedAt;
+      this.jobs.set(agentId, job);
+    }
+
     const proc = this.processes.get(agentId);
-    if (!adapter || !proc) return;
-    adapter.sendInput(proc, message);
-    this.clearAwaitingInput(agentId, message);
+
+    // 1) If there's a live process, use stdin send.
+    if (proc) {
+      adapter.sendInput(proc, message);
+      this.clearAwaitingInput(agentId, message);
+      return;
+    }
+
+    // 2) If the adapter supports resuming a persisted session (Claude/Codex style),
+    // start a new process that continues the same session.
+    if (adapter.canResume && adapter.resume && job.sessionId) {
+      const resumed = adapter.resume({
+        sessionId: job.sessionId,
+        task: message,
+        cwd: job.cwd,
+        mode: job.mode
+      });
+      this.attachProcess(agentId, resumed);
+
+      const outputStreams = [resumed.stdout, resumed.stderr].filter((s): s is Readable => s !== null);
+      if (outputStreams.length > 0) {
+        const merged = mergeStreams(outputStreams);
+        void this.consumeEvents(agentId, adapter.parseOutput(merged));
+      }
+      resumed.on("exit", (code) => {
+        const status = code === 0 ? "completed" : "error";
+        this.completeJob(agentId, status, { exitCode: code });
+      });
+
+      // We're continuing the job; mark input sent in our own event log.
+      this.clearAwaitingInput(agentId, message);
+      return;
+    }
+
+    // 3) Otherwise: no-op for now (soft-session replay not implemented yet).
   }
 
   kill(agentId: string): void {

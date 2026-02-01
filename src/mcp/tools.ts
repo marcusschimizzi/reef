@@ -3,7 +3,7 @@ import type { AgentManager } from "../agent/AgentManager.js";
 import type { ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 const spawnSchema = z.object({
-  agent: z.enum(["claude", "codex"]),
+  agent: z.enum(["claude", "codex", "opencode"]),
   task: z.string(),
   cwd: z.string().optional(),
   mode: z.enum(["headless", "headful"]).optional()
@@ -27,6 +27,8 @@ const killSchema = z.object({
   agentId: z.string()
 });
 
+const infoSchema = z.object({});
+
 type ToolDefinition<T extends z.ZodTypeAny> = {
   name: string;
   description: string;
@@ -36,7 +38,10 @@ type ToolDefinition<T extends z.ZodTypeAny> = {
 
 const defineTool = <T extends z.ZodTypeAny>(tool: ToolDefinition<T>) => tool;
 
-export function buildTools(manager: AgentManager) {
+export function buildTools(
+  manager: AgentManager,
+  info: { version: string; adapters: string[]; startedAt: number }
+) {
   const wrapResult = (data: Record<string, unknown>) => ({
     content: [{ type: "text" as const, text: JSON.stringify(data) }],
     structuredContent: data
@@ -85,6 +90,18 @@ export function buildTools(manager: AgentManager) {
       handler: async (args: z.infer<typeof killSchema>) => {
         manager.kill(args.agentId);
         return wrapResult({ ok: true });
+      }
+    }),
+    defineTool({
+      name: "reef:info",
+      description: "Return server version, adapters, and uptime.",
+      inputSchema: infoSchema,
+      handler: async () => {
+        return wrapResult({
+          version: info.version,
+          adapters: info.adapters,
+          uptimeMs: Date.now() - info.startedAt
+        });
       }
     })
   ];

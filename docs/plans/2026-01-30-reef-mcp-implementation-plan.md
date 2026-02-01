@@ -2,7 +2,9 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Build a stdio MCP server in TypeScript/Node.js with adapters for Claude and Codex, spawn/status/send/output/kill tools, normalized events with timestamps, and thin persistence to `./.reef/state.json` (keep last 20 completed jobs).
+**Goal:** Build a stdio MCP server in TypeScript/Node.js with adapters for Claude, Codex, and OpenCode, spawn/status/send/output/kill tools, normalized events with timestamps, and thin persistence to `./.reef/state.json` (keep last 20 completed jobs).
+
+**Note:** OpenCode support is intended in Phase 1 (JSONL output with `-f json`). If OpenCode is not available in the current environment, use a fixture for parser tests and validate spawn behavior once the binary is installed.
 
 **Architecture:** A JSON-RPC MCP server routes tool calls to an AgentManager that owns job lifecycle, event streams, and persistence snapshots. Agent-specific logic lives only in adapters, which emit normalized events. Persistence is recovery-only and marks loaded jobs as stale.
 
