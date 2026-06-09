@@ -40,6 +40,8 @@ export class Daemon {
   private readonly inbox: Inbox<Wake>;
   private readonly workspaceDir: string;
   private readonly maxSteps: number;
+  /** Abort handles for in-flight runs, keyed by session — powers cancellation. */
+  private readonly aborters = new Map<string, AbortController>();
 
   constructor(opts: DaemonOptions) {
     this.spine = new Spine(opts.dbPath);
@@ -77,6 +79,14 @@ export class Daemon {
     }
   }
 
+  /** Cancel the in-flight run for a session (reef-docs/03 cancellation). */
+  cancel(sessionKey: string): boolean {
+    const aborter = this.aborters.get(sessionKey);
+    if (!aborter) return false;
+    aborter.abort();
+    return true;
+  }
+
   close(): void {
     this.spine.close();
   }
@@ -105,13 +115,19 @@ export class Daemon {
     }
     const root = join(this.workspaceDir, agent.id);
     await mkdir(root, { recursive: true });
-    await runAgentLoop(run, agent, {
-      spine: this.spine,
-      router: this.router,
-      tools: this.tools,
-      toolContext: { fs: new BoundFs(root) },
-      emit: this.sink.emit,
-      maxSteps: this.maxSteps,
-    });
+    const aborter = new AbortController();
+    this.aborters.set(run.sessionKey, aborter);
+    try {
+      await runAgentLoop(run, agent, {
+        spine: this.spine,
+        router: this.router,
+        tools: this.tools,
+        toolContext: { fs: new BoundFs(root), signal: aborter.signal },
+        emit: this.sink.emit,
+        maxSteps: this.maxSteps,
+      });
+    } finally {
+      this.aborters.delete(run.sessionKey);
+    }
   }
 }
