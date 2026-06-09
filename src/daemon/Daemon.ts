@@ -8,6 +8,7 @@ import { BoundFs } from "../fs/capability.js";
 import { runAgentLoop } from "../loop/AgentLoop.js";
 import { VercelRouter, type ModelRouter } from "../model/router.js";
 import { builtinTools } from "../tools/builtins.js";
+import { fileTools } from "../tools/files.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { EventSink } from "./sink.js";
 import { Inbox } from "./inbox.js";
@@ -50,7 +51,7 @@ export class Daemon {
     this.workspaceDir = opts.workspaceDir;
     this.maxSteps = opts.maxSteps ?? 20;
     this.tools = new ToolRegistry();
-    for (const tool of builtinTools) this.tools.register(tool);
+    for (const tool of [...builtinTools, ...fileTools]) this.tools.register(tool);
     this.inbox = new Inbox<Wake>((wake) => this.processWake(wake));
   }
 

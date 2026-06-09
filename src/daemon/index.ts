@@ -20,9 +20,11 @@ const DEFAULT_AGENT: AgentRecord = {
   name: "Reef",
   systemPrompt:
     "You are Reef, an always-on personal agent. Be concise and direct. " +
-    "Use the available tools when they help answer the user.",
+    "You have a workspace you can read and write files in (read_file, write_file, " +
+    "edit_file, list_files) — all paths are relative to that workspace. Use the " +
+    "available tools when they help accomplish the task.",
   model: "claude-opus-4-8",
-  toolAllowlist: ["echo", "get_time"],
+  toolAllowlist: ["echo", "get_time", "read_file", "write_file", "edit_file", "list_files"],
 };
 
 const daemon = new Daemon({
