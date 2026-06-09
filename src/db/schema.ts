@@ -1,0 +1,85 @@
+import type { Database } from "better-sqlite3";
+
+// The operational spine's schema (reef-docs/04). The database holds the state
+// the *system* reasons over and recovers from; the filesystem holds artifacts.
+// Everything here is queried, mutated atomically, and reconcilable after a crash.
+
+const DDL = `
+CREATE TABLE IF NOT EXISTS agents (
+  id            TEXT PRIMARY KEY,
+  name          TEXT NOT NULL,
+  system_prompt TEXT NOT NULL,
+  model         TEXT NOT NULL,
+  tool_allowlist TEXT NOT NULL,   -- JSON string[]
+  created_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  session_key TEXT PRIMARY KEY,
+  agent_id    TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  FOREIGN KEY (agent_id) REFERENCES agents(id)
+);
+
+-- The canonical conversation. Spans runs within a session (reef-docs/03: a run
+-- is the unit of work, the session is the unit of conversation).
+CREATE TABLE IF NOT EXISTS messages (
+  session_key TEXT NOT NULL,
+  seq         INTEGER NOT NULL,
+  role        TEXT NOT NULL,
+  content     TEXT NOT NULL,      -- JSON ContentBlock[]
+  run_id      TEXT,
+  created_at  TEXT NOT NULL,
+  PRIMARY KEY (session_key, seq)
+);
+
+CREATE TABLE IF NOT EXISTS runs (
+  id            TEXT PRIMARY KEY,
+  agent_id      TEXT NOT NULL,
+  session_key   TEXT NOT NULL,
+  status        TEXT NOT NULL,    -- running | suspended | completed | failed
+  stop_reason   TEXT,
+  parent_run_id TEXT,
+  started_at    TEXT NOT NULL,
+  ended_at      TEXT,
+  FOREIGN KEY (agent_id) REFERENCES agents(id)
+);
+CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
+
+-- The durable unit of progress (reef-docs/03). One row per loop iteration:
+-- inserted 'pending' before the model call, updated to 'committed' after the
+-- call and its tools resolve. Recovery = "which steps were pending when we died".
+CREATE TABLE IF NOT EXISTS steps (
+  run_id       TEXT NOT NULL,
+  idx          INTEGER NOT NULL,
+  state        TEXT NOT NULL,     -- pending | committed
+  response     TEXT,              -- JSON ContentBlock[]
+  tool_results TEXT,              -- JSON ContentBlock[]
+  usage        TEXT,              -- JSON Usage
+  started_at   TEXT NOT NULL,
+  committed_at TEXT,
+  PRIMARY KEY (run_id, idx),
+  FOREIGN KEY (run_id) REFERENCES runs(id)
+);
+CREATE INDEX IF NOT EXISTS idx_steps_state ON steps(state);
+
+-- The native protocol event log (reef-docs/04 per-run event log; shape left open
+-- in reef-docs/10). Persisted so a consumer can fetch history and reconnect
+-- without replay gaps (conch's reconnect pattern). Emitter lands in Phase 2.
+CREATE TABLE IF NOT EXISTS events (
+  session_key TEXT NOT NULL,
+  seq         INTEGER NOT NULL,
+  run_id      TEXT,
+  type        TEXT NOT NULL,
+  payload     TEXT NOT NULL,      -- JSON ReefEvent (full event)
+  ts          INTEGER NOT NULL,
+  PRIMARY KEY (session_key, seq)
+);
+`;
+
+export function applySchema(db: Database): void {
+  db.pragma("journal_mode = WAL");
+  db.pragma("synchronous = NORMAL");
+  db.pragma("foreign_keys = ON");
+  db.exec(DDL);
+}

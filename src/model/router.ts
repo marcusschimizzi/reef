@@ -1,0 +1,214 @@
+// The model router — reef's thin seam over the vendored provider layer
+// (Vercel AI SDK). The loop depends on the `ModelRouter` *interface*; nothing
+// above this file imports an `ai`-package type. Provider-specific shape
+// (Anthropic tool-result output kinds, usage field names, the tool-call part
+// format) is quarantined here. A second provider is a new `resolveModel` branch
+// — not a change to the loop (reef-docs/09: own the loop, vendor the routing).
+
+import { anthropic } from "@ai-sdk/anthropic";
+import {
+  streamText,
+  tool,
+  type JSONValue,
+  type LanguageModel,
+  type ModelMessage,
+  type ToolSet,
+} from "ai";
+import type { z } from "zod";
+import type { ContentBlock, Message, Usage } from "../core/types.js";
+
+/** A tool as the *model* needs to see it — name, description, input schema.
+ *  (Execution is the loop's job, via the full Tool + its context.) */
+export interface ModelTool {
+  name: string;
+  description: string;
+  inputSchema: z.ZodType<any>;
+}
+
+/** Why the model stopped this turn — reef's normalization of finishReason. */
+export type TurnStop = "completed" | "tool_use" | "max_tokens" | "other";
+
+export interface ModelTurnInput {
+  model: string;
+  system: string;
+  messages: Message[];
+  tools?: ModelTool[];
+  maxOutputTokens?: number;
+  onTextDelta?: (text: string) => void;
+  onThinkingDelta?: (text: string) => void;
+  signal?: AbortSignal;
+}
+
+export interface ModelTurn {
+  /** Assistant output for this turn — text blocks plus any tool_use blocks. */
+  content: ContentBlock[];
+  stop: TurnStop;
+  usage: Usage;
+}
+
+/** The seam the loop calls. Implementations map to/from a concrete provider. */
+export interface ModelRouter {
+  generateTurn(input: ModelTurnInput): Promise<ModelTurn>;
+}
+
+/** Maps a model id to a vendored provider model. v1: Anthropic only. */
+function resolveModel(id: string): LanguageModel {
+  const bare = id.startsWith("anthropic/") ? id.slice("anthropic/".length) : id;
+  return anthropic(bare);
+}
+
+export class VercelRouter implements ModelRouter {
+  async generateTurn(input: ModelTurnInput): Promise<ModelTurn> {
+    const result = streamText({
+      model: resolveModel(input.model),
+      system: input.system,
+      messages: toModelMessages(input.messages),
+      tools: input.tools ? toAiTools(input.tools) : undefined,
+      maxOutputTokens: input.maxOutputTokens ?? 8192,
+      abortSignal: input.signal,
+    });
+
+    // Drain the stream so deltas reach the consumer; the promises below resolve
+    // once it completes.
+    for await (const chunk of result.fullStream) {
+      if (chunk.type === "text-delta") input.onTextDelta?.(chunk.text);
+      else if (chunk.type === "reasoning-delta")
+        input.onThinkingDelta?.(chunk.text);
+    }
+
+    const [finishReason, toolCalls, text, usage] = await Promise.all([
+      result.finishReason,
+      result.toolCalls,
+      result.text,
+      result.usage,
+    ]);
+
+    const content: ContentBlock[] = [];
+    if (text.length > 0) content.push({ type: "text", text });
+    for (const tc of toolCalls) {
+      content.push({
+        type: "tool_use",
+        id: tc.toolCallId,
+        name: tc.toolName,
+        input: tc.input,
+      });
+    }
+
+    return { content, stop: toTurnStop(finishReason), usage: toUsage(usage) };
+  }
+}
+
+// ── mapping at the boundary ──────────────────────────────────────────────────
+
+function toTurnStop(reason: string): TurnStop {
+  switch (reason) {
+    case "tool-calls":
+      return "tool_use";
+    case "stop":
+      return "completed";
+    case "length":
+      return "max_tokens";
+    default:
+      return "other";
+  }
+}
+
+function toUsage(u: {
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedInputTokens?: number;
+}): Usage {
+  return {
+    inputTokens: u.inputTokens ?? 0,
+    outputTokens: u.outputTokens ?? 0,
+    cacheReadTokens: u.cachedInputTokens,
+  };
+}
+
+function toAiTools(tools: ModelTool[]): ToolSet {
+  const rec: ToolSet = {};
+  for (const t of tools) {
+    rec[t.name] = tool({ description: t.description, inputSchema: t.inputSchema });
+  }
+  return rec;
+}
+
+function toToolOutput(output: unknown, isError?: boolean) {
+  if (isError) {
+    return typeof output === "string"
+      ? ({ type: "error-text", value: output } as const)
+      : ({ type: "error-json", value: output as JSONValue } as const);
+  }
+  return typeof output === "string"
+    ? ({ type: "text", value: output } as const)
+    : ({ type: "json", value: output as JSONValue } as const);
+}
+
+function toModelMessages(messages: Message[]): ModelMessage[] {
+  // tool_result blocks carry only the tool_use id; the AI SDK tool-result part
+  // also wants the tool name. Resolve it from the matching tool_use across the
+  // whole history.
+  const toolNameById = new Map<string, string>();
+  for (const m of messages) {
+    for (const b of m.content) {
+      if (b.type === "tool_use") toolNameById.set(b.id, b.name);
+    }
+  }
+
+  const out: ModelMessage[] = [];
+  for (const m of messages) {
+    switch (m.role) {
+      case "system": {
+        const text = m.content
+          .filter((b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text")
+          .map((b) => b.text)
+          .join("\n");
+        out.push({ role: "system", content: text });
+        break;
+      }
+      case "user": {
+        out.push({
+          role: "user",
+          content: m.content
+            .filter((b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text")
+            .map((b) => ({ type: "text" as const, text: b.text })),
+        });
+        break;
+      }
+      case "assistant": {
+        const parts: Array<
+          | { type: "text"; text: string }
+          | { type: "tool-call"; toolCallId: string; toolName: string; input: unknown }
+        > = [];
+        for (const b of m.content) {
+          if (b.type === "text") parts.push({ type: "text", text: b.text });
+          else if (b.type === "tool_use")
+            parts.push({
+              type: "tool-call",
+              toolCallId: b.id,
+              toolName: b.name,
+              input: b.input,
+            });
+          // thinking blocks are dropped from replayed history
+        }
+        out.push({ role: "assistant", content: parts });
+        break;
+      }
+      case "tool": {
+        out.push({
+          role: "tool",
+          content: m.content
+            .filter((b): b is Extract<ContentBlock, { type: "tool_result" }> => b.type === "tool_result")
+            .map((b) => ({
+              type: "tool-result" as const,
+              toolCallId: b.toolUseId,
+              toolName: toolNameById.get(b.toolUseId) ?? "unknown",
+              output: toToolOutput(b.output, b.isError),
+            })),
+        });
+        break;
+      }
+    }
+  }
+  return out;
+}

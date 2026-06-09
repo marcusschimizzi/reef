@@ -3,20 +3,25 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "main": "dist/index.js",
+  "main": "dist/daemon/index.js",
   "bin": {
-    "reef": "dist/index.js"
+    "reef": "dist/client/cli.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "dev": "tsx src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "daemon": "tsx src/daemon/index.ts",
+    "cli": "tsx src/client/cli.ts",
     "test": "vitest run"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@ai-sdk/anthropic": "^3.0.81",
+    "ai": "^6.0.198",
+    "better-sqlite3": "^11.8.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^22.0.0",
     "tsx": "^4.0.0",
     "typescript": "^5.5.0",
