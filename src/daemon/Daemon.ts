@@ -2,13 +2,14 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { newRunId } from "../core/ids.js";
 import { nowIso } from "../core/time.js";
-import type { AgentRecord, Run } from "../core/types.js";
+import type { AgentRecord, ApprovalStatus, Run } from "../core/types.js";
 import { Spine } from "../db/spine.js";
 import { BoundFs } from "../fs/capability.js";
-import { runAgentLoop } from "../loop/AgentLoop.js";
+import { runAgentLoop, type LoopOptions } from "../loop/AgentLoop.js";
 import { VercelRouter, type ModelRouter } from "../model/router.js";
 import { builtinTools } from "../tools/builtins.js";
 import { fileTools } from "../tools/files.js";
+import { shellTools } from "../tools/shell.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { EventSink } from "./sink.js";
 import { Inbox } from "./inbox.js";
@@ -27,6 +28,12 @@ interface Wake {
   message: string;
 }
 
+// Everything the agent might wake for funnels into one serial inbox: a user
+// message, or a resume after an approval resolved (reef-docs/05 — one queue).
+type Job =
+  | { kind: "message"; wake: Wake }
+  | { kind: "resume"; runId: string };
+
 /**
  * The always-on agent runtime. Owns the spine (state), the router (model), the
  * tool registry, and the event sink. Wakes enter the inbox and are worked one
@@ -38,7 +45,7 @@ export class Daemon {
   readonly sink: EventSink;
   private readonly router: ModelRouter;
   private readonly tools: ToolRegistry;
-  private readonly inbox: Inbox<Wake>;
+  private readonly inbox: Inbox<Job>;
   private readonly workspaceDir: string;
   private readonly maxSteps: number;
   /** Abort handles for in-flight runs, keyed by session — powers cancellation. */
@@ -51,8 +58,10 @@ export class Daemon {
     this.workspaceDir = opts.workspaceDir;
     this.maxSteps = opts.maxSteps ?? 20;
     this.tools = new ToolRegistry();
-    for (const tool of [...builtinTools, ...fileTools]) this.tools.register(tool);
-    this.inbox = new Inbox<Wake>((wake) => this.processWake(wake));
+    for (const tool of [...builtinTools, ...fileTools, ...shellTools]) {
+      this.tools.register(tool);
+    }
+    this.inbox = new Inbox<Job>((job) => this.processJob(job));
   }
 
   registerAgent(agent: AgentRecord): void {
@@ -63,16 +72,39 @@ export class Daemon {
     return this.sink.subscribe(fn);
   }
 
-  /** Enqueue a user-message wake; resolves when its run terminates. */
+  /** Enqueue a user-message wake; resolves when its run terminates or suspends. */
   submit(wake: Wake): Promise<void> {
-    return this.inbox.enqueue(wake);
+    return this.inbox.enqueue({ kind: "message", wake });
+  }
+
+  /**
+   * Resolve a pending tool approval. Records the decision durably; once every
+   * approval for the run's suspended turn is decided, re-drives the run (through
+   * the same serial inbox) to execute the decided tools and continue.
+   */
+  resolveApproval(approvalId: string, decision: string): boolean {
+    const approval = this.spine.getApproval(approvalId);
+    if (!approval || approval.status !== "pending") return false;
+    const status: ApprovalStatus = decision === "deny" ? "denied" : "allowed";
+    this.spine.resolveApproval(approvalId, status, decision);
+    this.sink.emit({
+      type: "approval.resolved",
+      sessionKey: approval.sessionKey,
+      runId: approval.runId,
+      approvalId,
+      decision:
+        decision === "allow-always" ? "allow-always" : decision === "deny" ? "deny" : "allow-once",
+    });
+    if (this.spine.pendingApprovalCount(approval.runId) === 0) {
+      void this.inbox.enqueue({ kind: "resume", runId: approval.runId });
+    }
+    return true;
   }
 
   /**
    * Startup recovery (reef-docs/04): re-drive every run left mid-flight by a
-   * crash. The loop is resume-aware — it continues after the steps already
-   * committed to the spine — so this picks up exactly where the durable record
-   * left off rather than restarting or guessing.
+   * crash. Suspended runs (awaiting approval) are intentionally parked and not
+   * returned here — they resume only when their approvals resolve.
    */
   async recover(): Promise<void> {
     for (const run of this.spine.getInterruptedRuns()) {
@@ -92,6 +124,11 @@ export class Daemon {
     this.spine.close();
   }
 
+  private async processJob(job: Job): Promise<void> {
+    if (job.kind === "message") return this.processWake(job.wake);
+    return this.resumeRun(job.runId);
+  }
+
   private async processWake(wake: Wake): Promise<void> {
     this.spine.ensureSession(wake.sessionKey, wake.agentId);
     this.spine.appendMessage(wake.sessionKey, "user", [
@@ -105,7 +142,14 @@ export class Daemon {
     await this.runLoop(run);
   }
 
-  private async runLoop(run: Run): Promise<void> {
+  private async resumeRun(runId: string): Promise<void> {
+    const run = this.spine.getRun(runId);
+    if (!run) return;
+    this.spine.setRunStatus(runId, "running");
+    await this.runLoop({ ...run, status: "running" }, { resumeApproval: true });
+  }
+
+  private async runLoop(run: Run, options: LoopOptions = {}): Promise<void> {
     const agent = this.spine.getAgent(run.agentId);
     if (!agent) {
       this.spine.setRunStatus(run.id, "failed", {
@@ -119,14 +163,19 @@ export class Daemon {
     const aborter = new AbortController();
     this.aborters.set(run.sessionKey, aborter);
     try {
-      await runAgentLoop(run, agent, {
-        spine: this.spine,
-        router: this.router,
-        tools: this.tools,
-        toolContext: { fs: new BoundFs(root), signal: aborter.signal },
-        emit: this.sink.emit,
-        maxSteps: this.maxSteps,
-      });
+      await runAgentLoop(
+        run,
+        agent,
+        {
+          spine: this.spine,
+          router: this.router,
+          tools: this.tools,
+          toolContext: { fs: new BoundFs(root), workspaceRoot: root, signal: aborter.signal },
+          emit: this.sink.emit,
+          maxSteps: this.maxSteps,
+        },
+        options,
+      );
     } finally {
       this.aborters.delete(run.sessionKey);
     }

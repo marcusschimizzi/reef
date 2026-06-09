@@ -57,7 +57,7 @@ function setup(turns: ModelTurn[]) {
     spine,
     router,
     tools,
-    toolContext: { fs: new BoundFs(join(dir, "ws")) },
+    toolContext: { fs: new BoundFs(join(dir, "ws")), workspaceRoot: join(dir, "ws") },
     emit: (e: ReefEventInit) => events.push(e),
   };
   return { spine, router, events, deps };

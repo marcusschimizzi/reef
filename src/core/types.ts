@@ -91,6 +91,27 @@ export interface Run {
   endedAt?: string;
 }
 
+export type ApprovalStatus = "pending" | "allowed" | "denied";
+
+/**
+ * A durable record of a tool call awaiting (or having received) human approval.
+ * Persisting these is what makes suspend-for-approval survive a daemon restart
+ * (reef-docs/03 suspension; reef-docs/00 reliability-first).
+ */
+export interface Approval {
+  id: string;
+  runId: string;
+  sessionKey: string;
+  toolUseId: string;
+  toolName: string;
+  input: unknown;
+  status: ApprovalStatus;
+  /** The consumer's raw decision string (e.g. allow-once / allow-always / deny). */
+  decision?: string;
+  createdAt: string;
+  decidedAt?: string;
+}
+
 export type StepState = "pending" | "committed";
 
 /**

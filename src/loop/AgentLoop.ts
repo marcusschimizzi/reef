@@ -1,3 +1,4 @@
+import { newApprovalId } from "../core/ids.js";
 import { nowIso } from "../core/time.js";
 import type {
   AgentRecord,
@@ -23,41 +24,49 @@ export interface LoopDeps {
   maxSteps?: number;
 }
 
+export interface LoopOptions {
+  /** Resume a run that was suspended awaiting approval: the model turn already
+   *  exists on the pending step; execute its (now-decided) tools and continue. */
+  resumeApproval?: boolean;
+}
+
+type ToolUse = Extract<ContentBlock, { type: "tool_use" }>;
+
 /**
- * The one parameterized agent loop (reef-docs/03). Runs a single Run to a typed
- * termination: assemble context → model turn → run tools → repeat. Each
- * iteration is a durable step — the model turn and its tools are committed to
- * the spine in one boundary before the next iteration begins.
+ * The one parameterized agent loop (reef-docs/03). Assemble context → model turn
+ * → run tools → repeat, to a typed termination, one durable step per iteration.
  *
- * The wake (a user message) is expected to already be on the session; the loop
- * reads the conversation from the spine and advances it.
+ * Gated tools (needsApproval) suspend the run: the loop emits approval.requested,
+ * persists the pending approval + the model turn, and returns `awaiting_approval`
+ * with the step left pending. A later resolve re-drives the run in resumeApproval
+ * mode, which executes the decided tools and continues — suspension is just a
+ * stop-reason plus the ordinary durable-record path, not a paused process.
  */
 export async function runAgentLoop(
   run: Run,
   agent: AgentRecord,
   deps: LoopDeps,
+  options: LoopOptions = {},
 ): Promise<StopReason> {
   const { spine, router, tools, toolContext } = deps;
   const maxSteps = deps.maxSteps ?? 20;
 
   const emit = (body: ReefEventBody): void =>
-    deps.emit({
-      ...body,
-      sessionKey: run.sessionKey,
-      runId: run.id,
-    } as ReefEventInit);
+    deps.emit({ ...body, sessionKey: run.sessionKey, runId: run.id } as ReefEventInit);
 
-  emit({ type: "run.started", agentId: agent.id });
+  emit(options.resumeApproval ? { type: "run.resumed" } : { type: "run.started", agentId: agent.id });
 
   const modelTools = tools.modelTools(agent.toolAllowlist);
-  // Resume-aware: continue after any steps already committed (crash recovery).
-  let index = spine
-    .getSteps(run.id)
-    .filter((s) => s.state === "committed").length;
-
+  let index = spine.getSteps(run.id).filter((s) => s.state === "committed").length;
   let stopReason: StopReason = "completed";
 
   try {
+    // Resume preamble: finish the suspended turn whose tools were just decided.
+    if (options.resumeApproval) {
+      if (spine.pendingApprovalCount(run.id) > 0) return "awaiting_approval";
+      if (await finishSuspendedTurn(run, deps, emit, index)) index++;
+    }
+
     while (true) {
       if (toolContext.signal?.aborted) {
         stopReason = "cancelled";
@@ -86,49 +95,44 @@ export async function runAgentLoop(
       emit({ type: "message.completed", content: turn.content });
 
       const toolUses = turn.content.filter(
-        (b): b is Extract<ContentBlock, { type: "tool_use" }> =>
-          b.type === "tool_use",
+        (b): b is ToolUse => b.type === "tool_use",
       );
+
+      // Suspend the whole turn if any tool in it needs approval.
+      const gated = toolUses.filter((c) => tools.get(c.name)?.needsApproval);
+      if (gated.length > 0) {
+        spine.updateStepOutput(run.id, index, {
+          response: turn.content,
+          usage: turn.usage,
+        });
+        for (const call of gated) {
+          const approvalId = newApprovalId();
+          spine.createApproval({
+            id: approvalId,
+            runId: run.id,
+            sessionKey: run.sessionKey,
+            toolUseId: call.id,
+            toolName: call.name,
+            input: call.input,
+          });
+          emit({
+            type: "approval.requested",
+            approvalId,
+            action: describeAction(call),
+            detail: call.input,
+          });
+        }
+        spine.setRunStatus(run.id, "suspended", { stopReason: "awaiting_approval" });
+        emit({ type: "run.suspended", stopReason: "awaiting_approval" });
+        return "awaiting_approval";
+      }
 
       let toolResults: ContentBlock[] | undefined;
       if (turn.stop === "tool_use" && toolUses.length > 0) {
-        toolResults = [];
-        for (const call of toolUses) {
-          const tool = tools.get(call.name);
-          emit({
-            type: "tool.requested",
-            toolUseId: call.id,
-            name: call.name,
-            input: call.input,
-            needsApproval: tool?.needsApproval ?? false,
-          });
-          emit({ type: "tool.started", toolUseId: call.id });
-          try {
-            if (!tool) throw new Error(`unknown tool: ${call.name}`);
-            const output = await tool.run(call.input, toolContext);
-            emit({ type: "tool.completed", toolUseId: call.id, output });
-            toolResults.push({
-              type: "tool_result",
-              toolUseId: call.id,
-              output,
-            });
-          } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            emit({ type: "tool.failed", toolUseId: call.id, error: message });
-            // An errored tool is an *input* to the loop, not a run failure: the
-            // model sees the error and can adapt (reef-docs/03).
-            toolResults.push({
-              type: "tool_result",
-              toolUseId: call.id,
-              output: message,
-              isError: true,
-            });
-          }
-        }
+        toolResults = await executeTools(toolUses, run, deps, emit);
         spine.appendMessage(run.sessionKey, "tool", toolResults, run.id);
       }
 
-      // The durable boundary: one commit per iteration, after tools resolve.
       spine.commitStep(run.id, index, {
         response: turn.content,
         toolResults,
@@ -156,6 +160,85 @@ export async function runAgentLoop(
   finalize(spine, run, "completed", stopReason);
   emit({ type: "run.completed", stopReason });
   return stopReason;
+}
+
+/**
+ * Execute a turn's tool calls. Gated calls are governed by their durable
+ * approval decision: denied → a denial result fed back to the model; allowed or
+ * ungated → run. An errored tool is an input to the loop, not a run failure.
+ */
+async function executeTools(
+  toolUses: ToolUse[],
+  run: Run,
+  deps: LoopDeps,
+  emit: (body: ReefEventBody) => void,
+): Promise<ContentBlock[]> {
+  const { spine, tools, toolContext } = deps;
+  const approvals = new Map(
+    spine.getApprovalsForRun(run.id).map((a) => [a.toolUseId, a]),
+  );
+  const results: ContentBlock[] = [];
+
+  for (const call of toolUses) {
+    const tool = tools.get(call.name);
+    const approval = approvals.get(call.id);
+    emit({
+      type: "tool.requested",
+      toolUseId: call.id,
+      name: call.name,
+      input: call.input,
+      needsApproval: tool?.needsApproval ?? false,
+    });
+
+    if (approval?.status === "denied") {
+      const message = "The user denied this action.";
+      emit({ type: "tool.failed", toolUseId: call.id, error: message });
+      results.push({ type: "tool_result", toolUseId: call.id, output: message, isError: true });
+      continue;
+    }
+
+    emit({ type: "tool.started", toolUseId: call.id });
+    try {
+      if (!tool) throw new Error(`unknown tool: ${call.name}`);
+      const output = await tool.run(call.input, toolContext);
+      emit({ type: "tool.completed", toolUseId: call.id, output });
+      results.push({ type: "tool_result", toolUseId: call.id, output });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      emit({ type: "tool.failed", toolUseId: call.id, error: message });
+      results.push({ type: "tool_result", toolUseId: call.id, output: message, isError: true });
+    }
+  }
+  return results;
+}
+
+/** Execute and commit the pending (suspended) turn after approvals resolved. */
+async function finishSuspendedTurn(
+  run: Run,
+  deps: LoopDeps,
+  emit: (body: ReefEventBody) => void,
+  index: number,
+): Promise<boolean> {
+  const { spine } = deps;
+  const pending = spine.getSteps(run.id).find((s) => s.state === "pending");
+  if (!pending?.response) return false;
+
+  const toolUses = pending.response.filter((b): b is ToolUse => b.type === "tool_use");
+  const toolResults = await executeTools(toolUses, run, deps, emit);
+  spine.appendMessage(run.sessionKey, "tool", toolResults, run.id);
+  spine.commitStep(run.id, pending.index, {
+    response: pending.response,
+    toolResults,
+    usage: pending.usage,
+  });
+  emit({ type: "step.committed", index: pending.index, usage: pending.usage });
+  return true;
+}
+
+function describeAction(call: ToolUse): string {
+  const input = JSON.stringify(call.input);
+  const shown = input.length > 300 ? `${input.slice(0, 300)}…` : input;
+  return `${call.name}(${shown})`;
 }
 
 function finalize(

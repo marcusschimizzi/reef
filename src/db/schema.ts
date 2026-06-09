@@ -63,6 +63,23 @@ CREATE TABLE IF NOT EXISTS steps (
 );
 CREATE INDEX IF NOT EXISTS idx_steps_state ON steps(state);
 
+-- Durable tool-approval records. A run with pending approvals is 'suspended'
+-- (awaiting_approval) and survives a daemon restart; resolving them re-drives it.
+CREATE TABLE IF NOT EXISTS approvals (
+  id          TEXT PRIMARY KEY,
+  run_id      TEXT NOT NULL,
+  session_key TEXT NOT NULL,
+  tool_use_id TEXT NOT NULL,
+  tool_name   TEXT NOT NULL,
+  input       TEXT NOT NULL,     -- JSON
+  status      TEXT NOT NULL,     -- pending | allowed | denied
+  decision    TEXT,
+  created_at  TEXT NOT NULL,
+  decided_at  TEXT,
+  FOREIGN KEY (run_id) REFERENCES runs(id)
+);
+CREATE INDEX IF NOT EXISTS idx_approvals_run ON approvals(run_id);
+
 -- The native protocol event log (reef-docs/04 per-run event log; shape left open
 -- in reef-docs/10). Persisted so a consumer can fetch history and reconnect
 -- without replay gaps (conch's reconnect pattern). Emitter lands in Phase 2.

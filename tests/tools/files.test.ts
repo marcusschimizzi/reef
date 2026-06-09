@@ -15,7 +15,7 @@ const dirs: string[] = [];
 function ctx(): ToolContext {
   const dir = mkdtempSync(join(tmpdir(), "reef-files-"));
   dirs.push(dir);
-  return { fs: new BoundFs(dir) };
+  return { fs: new BoundFs(dir), workspaceRoot: dir };
 }
 afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });

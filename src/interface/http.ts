@@ -72,10 +72,11 @@ async function handle(
 
   const approval = path.match(/^\/v1\/approvals\/([^/]+)\/resolve$/);
   if (method === "POST" && approval) {
-    // Approval resume lands with the first gated tool (Phase 3). The endpoint
-    // exists now so conch's resolveApproval has a target; today it's a no-op.
-    await readJson(req);
-    return sendJson(res, 200, { ok: true });
+    const body = await readJson(req);
+    const id = decodeURIComponent(approval[1] ?? "");
+    const decision = str(body.decision) || "deny";
+    const ok = daemon.resolveApproval(id, decision);
+    return sendJson(res, ok ? 200 : 404, { ok });
   }
 
   sendJson(res, 404, { ok: false, error: "not found" });

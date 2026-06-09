@@ -6,6 +6,8 @@ import type { FsCapability } from "../fs/capability.js";
 // (reef-docs/08). More context (approvals, memory) lands in later phases.
 export interface ToolContext {
   fs: FsCapability;
+  /** Absolute path of the agent's workspace — the default cwd for shell. */
+  workspaceRoot: string;
   signal?: AbortSignal;
 }
 

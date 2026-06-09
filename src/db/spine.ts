@@ -3,6 +3,8 @@ import { applySchema } from "./schema.js";
 import { nowIso } from "../core/time.js";
 import type {
   AgentRecord,
+  Approval,
+  ApprovalStatus,
   ContentBlock,
   Message,
   Role,
@@ -49,6 +51,18 @@ interface StepRow {
   usage: string | null;
   started_at: string;
   committed_at: string | null;
+}
+interface ApprovalRow {
+  id: string;
+  run_id: string;
+  session_key: string;
+  tool_use_id: string;
+  tool_name: string;
+  input: string;
+  status: string;
+  decision: string | null;
+  created_at: string;
+  decided_at: string | null;
 }
 
 const json = (v: unknown): string => JSON.stringify(v);
@@ -252,6 +266,23 @@ export class Spine {
       );
   }
 
+  /** Persist a model turn onto a still-pending step (used when suspending for
+   *  approval, so resume can reconstruct the turn with its usage intact). */
+  updateStepOutput(
+    runId: string,
+    index: number,
+    output: { response?: ContentBlock[]; usage?: Usage },
+  ): void {
+    this.db
+      .prepare(`UPDATE steps SET response = ?, usage = ? WHERE run_id = ? AND idx = ?`)
+      .run(
+        output.response ? json(output.response) : null,
+        output.usage ? json(output.usage) : null,
+        runId,
+        index,
+      );
+  }
+
   getSteps(runId: string): Step[] {
     const rows = this.db
       .prepare(`SELECT * FROM steps WHERE run_id = ? ORDER BY idx ASC`)
@@ -265,6 +296,52 @@ export class Spine {
       .prepare(`SELECT run_id, idx FROM steps WHERE state = 'pending'`)
       .all() as Array<{ run_id: string; idx: number }>;
     return rows.map((r) => ({ runId: r.run_id, index: r.idx }));
+  }
+
+  // ── approvals (durable suspend-for-approval) ────────────────────────────────
+  createApproval(a: {
+    id: string;
+    runId: string;
+    sessionKey: string;
+    toolUseId: string;
+    toolName: string;
+    input: unknown;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO approvals (id, run_id, session_key, tool_use_id, tool_name, input, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
+      )
+      .run(a.id, a.runId, a.sessionKey, a.toolUseId, a.toolName, json(a.input), nowIso());
+  }
+
+  getApproval(id: string): Approval | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM approvals WHERE id = ?`)
+      .get(id) as ApprovalRow | undefined;
+    return row ? rowToApproval(row) : undefined;
+  }
+
+  resolveApproval(id: string, status: ApprovalStatus, decision: string): void {
+    this.db
+      .prepare(
+        `UPDATE approvals SET status = ?, decision = ?, decided_at = ? WHERE id = ?`,
+      )
+      .run(status, decision, nowIso(), id);
+  }
+
+  getApprovalsForRun(runId: string): Approval[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM approvals WHERE run_id = ? ORDER BY created_at ASC`)
+      .all(runId) as ApprovalRow[];
+    return rows.map(rowToApproval);
+  }
+
+  pendingApprovalCount(runId: string): number {
+    const { c } = this.db
+      .prepare(`SELECT COUNT(*) AS c FROM approvals WHERE run_id = ? AND status = 'pending'`)
+      .get(runId) as { c: number };
+    return c;
   }
 
   // ── events (native protocol log; consumer reconnect — Phase 2) ──────────────
@@ -311,6 +388,21 @@ function rowToRun(row: RunRow): Run {
     parentRunId: row.parent_run_id ?? undefined,
     startedAt: row.started_at,
     endedAt: row.ended_at ?? undefined,
+  };
+}
+
+function rowToApproval(row: ApprovalRow): Approval {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    sessionKey: row.session_key,
+    toolUseId: row.tool_use_id,
+    toolName: row.tool_name,
+    input: JSON.parse(row.input),
+    status: row.status as ApprovalStatus,
+    decision: row.decision ?? undefined,
+    createdAt: row.created_at,
+    decidedAt: row.decided_at ?? undefined,
   };
 }
 
