@@ -284,6 +284,13 @@ export class Spine {
       );
   }
 
+  maxEventSeq(sessionKey: string): number {
+    const { m } = this.db
+      .prepare(`SELECT COALESCE(MAX(seq), 0) AS m FROM events WHERE session_key = ?`)
+      .get(sessionKey) as { m: number };
+    return m;
+  }
+
   getEventsSince(sessionKey: string, sinceSeq: number): ReefEvent[] {
     const rows = this.db
       .prepare(
