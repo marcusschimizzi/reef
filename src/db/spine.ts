@@ -95,9 +95,15 @@ const parse = <T>(s: string | null): T | undefined =>
 export class Spine {
   private readonly db: DB;
 
-  constructor(path: string) {
-    this.db = new Database(path);
+  constructor(dbOrPath: string | DB) {
+    this.db = typeof dbOrPath === "string" ? new Database(dbOrPath) : dbOrPath;
     applySchema(this.db);
+  }
+
+  /** The underlying connection — so the default memory store can share it
+   *  (one file, one handle) rather than opening a second connection. */
+  get connection(): DB {
+    return this.db;
   }
 
   close(): void {

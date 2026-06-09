@@ -7,12 +7,19 @@ import { Spine } from "../db/spine.js";
 import { BoundFs } from "../fs/capability.js";
 import { runAgentLoop, type LoopOptions } from "../loop/AgentLoop.js";
 import { VercelRouter, type ModelRouter } from "../model/router.js";
+import type { MemoryStore } from "../memory/seam.js";
+import { SqliteMemory } from "../memory/sqlite.js";
 import { builtinTools } from "../tools/builtins.js";
 import { fileTools } from "../tools/files.js";
 import { shellTools } from "../tools/shell.js";
+import { memoryTools } from "../tools/memory.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { EventSink } from "./sink.js";
 import { Inbox } from "./inbox.js";
+
+/** How the daemon obtains an agent's memory store — swap this to plug in a
+ *  different backend (e.g. a hybrid semantic store) behind the same seam. */
+export type MemoryFactory = (agentId: string) => MemoryStore;
 
 export interface DaemonOptions {
   dbPath: string;
@@ -20,6 +27,8 @@ export interface DaemonOptions {
   /** Injectable for tests; defaults to the real provider-routing layer. */
   router?: ModelRouter;
   maxSteps?: number;
+  /** Memory backend factory; defaults to the SQLite/FTS5 store on the spine db. */
+  memory?: MemoryFactory;
 }
 
 interface Wake {
@@ -48,6 +57,9 @@ export class Daemon {
   private readonly inbox: Inbox<Job>;
   private readonly workspaceDir: string;
   private readonly maxSteps: number;
+  private readonly memoryFactory: MemoryFactory;
+  /** One memory store per agent, built lazily and reused across that agent's runs. */
+  private readonly memories = new Map<string, MemoryStore>();
   /** Abort handles for in-flight runs, keyed by session — powers cancellation. */
   private readonly aborters = new Map<string, AbortController>();
 
@@ -57,11 +69,25 @@ export class Daemon {
     this.router = opts.router ?? new VercelRouter();
     this.workspaceDir = opts.workspaceDir;
     this.maxSteps = opts.maxSteps ?? 20;
+    // Default memory: the SQLite/FTS5 store sharing the spine's connection,
+    // scoped per agent so agents never see each other's memory.
+    this.memoryFactory =
+      opts.memory ?? ((agentId) => new SqliteMemory(this.spine.connection, agentId));
     this.tools = new ToolRegistry();
-    for (const tool of [...builtinTools, ...fileTools, ...shellTools]) {
+    for (const tool of [...builtinTools, ...fileTools, ...shellTools, ...memoryTools]) {
       this.tools.register(tool);
     }
     this.inbox = new Inbox<Job>((job) => this.processJob(job));
+  }
+
+  /** The agent's memory store, built on first use and cached for reuse. */
+  private memoryFor(agentId: string): MemoryStore {
+    let store = this.memories.get(agentId);
+    if (!store) {
+      store = this.memoryFactory(agentId);
+      this.memories.set(agentId, store);
+    }
+    return store;
   }
 
   registerAgent(agent: AgentRecord): void {
@@ -170,7 +196,12 @@ export class Daemon {
           spine: this.spine,
           router: this.router,
           tools: this.tools,
-          toolContext: { fs: new BoundFs(root), workspaceRoot: root, signal: aborter.signal },
+          toolContext: {
+            fs: new BoundFs(root),
+            workspaceRoot: root,
+            memory: this.memoryFor(agent.id),
+            signal: aborter.signal,
+          },
           emit: this.sink.emit,
           maxSteps: this.maxSteps,
         },

@@ -23,6 +23,9 @@ const DEFAULT_AGENT: AgentRecord = {
     "You have a workspace you can read and write files in (read_file, write_file, " +
     "edit_file, list_files) — those paths are relative to that workspace. You can " +
     "also run shell commands (shell), which require human approval before each run. " +
+    "You have a durable cross-session memory: use record_memory to save lasting " +
+    "facts, preferences, and decisions, and recall_memory to look them up before " +
+    "answering when prior context would help. " +
     "Use the available tools when they help accomplish the task.",
   model: "claude-opus-4-8",
   toolAllowlist: [
@@ -33,6 +36,8 @@ const DEFAULT_AGENT: AgentRecord = {
     "edit_file",
     "list_files",
     "shell",
+    "recall_memory",
+    "record_memory",
   ],
 };
 

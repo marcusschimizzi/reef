@@ -79,6 +79,53 @@ describe("Daemon", () => {
     daemon.close();
   });
 
+  it("carries memory across sessions: a fact recorded in one run is recalled in another", async () => {
+    const dir = tempDir();
+    const memAgent: AgentRecord = {
+      ...agent,
+      toolAllowlist: ["recall_memory", "record_memory"],
+    };
+    const daemon = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      router: new FakeRouter([
+        // session s1: save a durable fact
+        {
+          stop: "tool_use",
+          content: [
+            {
+              type: "tool_use",
+              id: "r1",
+              name: "record_memory",
+              input: { content: "The user's name is Marcus." },
+            },
+          ],
+          usage: { inputTokens: 5, outputTokens: 2 },
+        },
+        { stop: "completed", content: [{ type: "text", text: "saved" }], usage: { inputTokens: 6, outputTokens: 1 } },
+        // session s2 (different session, same agent): look it up
+        {
+          stop: "tool_use",
+          content: [
+            { type: "tool_use", id: "q1", name: "recall_memory", input: { query: "user's name" } },
+          ],
+          usage: { inputTokens: 7, outputTokens: 2 },
+        },
+        { stop: "completed", content: [{ type: "text", text: "It's Marcus" }], usage: { inputTokens: 8, outputTokens: 1 } },
+      ]),
+    });
+    daemon.registerAgent(memAgent);
+
+    await daemon.submit({ sessionKey: "s1", agentId: "reef", message: "remember my name is Marcus" });
+    await daemon.submit({ sessionKey: "s2", agentId: "reef", message: "what's my name?" });
+
+    // the recall tool result in the second session surfaced the first session's fact
+    const toolMsg = daemon.spine.getMessages("s2").find((m) => m.role === "tool");
+    const output = toolMsg?.content[0] as { output: { results: Array<{ content: string }> } };
+    expect(output.output.results[0]?.content).toBe("The user's name is Marcus.");
+    daemon.close();
+  });
+
   it("recovers an interrupted run by re-driving it from the durable record", async () => {
     const dir = tempDir();
     const dbPath = join(dir, "reef.db");

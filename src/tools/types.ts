@@ -1,13 +1,18 @@
 import type { z } from "zod";
 import type { FsCapability } from "../fs/capability.js";
+import type { MemoryStore } from "../memory/seam.js";
 
 // What a tool receives at execution time. The fs capability is injected here —
 // a tool reaches the filesystem only through `ctx.fs`, never via ambient paths
-// (reef-docs/08). More context (approvals, memory) lands in later phases.
+// (reef-docs/08). The memory store is injected the same way (reef-docs/07).
 export interface ToolContext {
   fs: FsCapability;
   /** Absolute path of the agent's workspace — the default cwd for shell. */
   workspaceRoot: string;
+  /** The agent's bound memory store. Present whenever the daemon runs a tool;
+   *  optional so lightweight/no-memory execution contexts (and tool tests that
+   *  don't touch memory) need not supply one. Memory tools assert it. */
+  memory?: MemoryStore;
   signal?: AbortSignal;
 }
 
