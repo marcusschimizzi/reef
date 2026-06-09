@@ -12,6 +12,7 @@ import type { ModelRouter } from "../model/router.js";
 import type { EmitFn, ReefEventBody, ReefEventInit } from "../protocol/events.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolContext } from "../tools/types.js";
+import { maybeCompact, type CompactionPolicy } from "./compaction.js";
 
 export interface LoopDeps {
   spine: Spine;
@@ -22,6 +23,8 @@ export interface LoopDeps {
   emit: EmitFn;
   /** Per-run iteration ceiling — the non-convergence backstop (reef-docs/03). */
   maxSteps?: number;
+  /** Context-compaction policy (Phase 3c); omit for the competent default. */
+  compaction?: CompactionPolicy;
 }
 
 export interface LoopOptions {
@@ -77,10 +80,22 @@ export async function runAgentLoop(
         break;
       }
 
+      // Between steps: fold older history into a durable summary if the last
+      // turn's context crossed the threshold. A no-op (no model call) otherwise.
+      await maybeCompact({
+        spine,
+        router,
+        run,
+        agent,
+        emit,
+        policy: deps.compaction,
+        signal: toolContext.signal,
+      });
+
       emit({ type: "step.started", index });
       spine.beginStep(run.id, index);
 
-      const messages = spine.getMessages(run.sessionKey);
+      const messages = spine.getContext(run.sessionKey);
       const turn = await router.generateTurn({
         model: agent.model,
         system: agent.systemPrompt,

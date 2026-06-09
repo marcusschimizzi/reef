@@ -5,6 +5,7 @@ import type {
   AgentRecord,
   Approval,
   ApprovalStatus,
+  Compaction,
   ContentBlock,
   Message,
   Role,
@@ -19,6 +20,11 @@ import type { ReefEvent } from "../protocol/events.js";
 
 type DB = Database.Database;
 
+/** A message with its per-session sequence — the anchor compaction cuts on. */
+export interface MessageEntry extends Message {
+  seq: number;
+}
+
 // ── row shapes (as stored) ──────────────────────────────────────────────────
 interface AgentRow {
   id: string;
@@ -31,6 +37,17 @@ interface AgentRow {
 interface MessageRow {
   role: string;
   content: string;
+}
+interface MessageEntryRow {
+  seq: number;
+  role: string;
+  content: string;
+}
+interface CompactionRow {
+  session_key: string;
+  through_seq: number;
+  summary: string;
+  created_at: string;
 }
 interface RunRow {
   id: string;
@@ -166,6 +183,78 @@ export class Spine {
       role: r.role as Role,
       content: JSON.parse(r.content) as ContentBlock[],
     }));
+  }
+
+  /** Messages with seq > afterSeq, seq attached — what compaction cuts on. */
+  getMessageEntries(sessionKey: string, afterSeq = 0): MessageEntry[] {
+    const rows = this.db
+      .prepare(
+        `SELECT seq, role, content FROM messages
+         WHERE session_key = ? AND seq > ? ORDER BY seq ASC`,
+      )
+      .all(sessionKey, afterSeq) as MessageEntryRow[];
+    return rows.map((r) => ({
+      seq: r.seq,
+      role: r.role as Role,
+      content: JSON.parse(r.content) as ContentBlock[],
+    }));
+  }
+
+  /**
+   * The compacted *view* the loop feeds to the model (Phase 3c). With no
+   * checkpoint this is exactly getMessages; with one it is the latest summary
+   * (as a leading user turn) followed by the verbatim tail (seq > throughSeq).
+   * The raw log is never touched — compaction is a projection, so recovery and
+   * audit still see the whole conversation.
+   */
+  getContext(sessionKey: string): Message[] {
+    const comp = this.getLatestCompaction(sessionKey);
+    const tail = this.getMessageEntries(sessionKey, comp?.throughSeq ?? 0).map(
+      ({ seq: _seq, ...m }) => m,
+    );
+    if (!comp) return tail;
+    return [
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: `[Summary of earlier conversation, condensed to stay within the context window]\n\n${comp.summary}`,
+          },
+        ],
+      },
+      ...tail,
+    ];
+  }
+
+  // ── compactions (the durable context-window checkpoints, Phase 3c) ──────────
+  appendCompaction(c: {
+    sessionKey: string;
+    throughSeq: number;
+    summary: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO compactions (session_key, through_seq, summary, created_at)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(c.sessionKey, c.throughSeq, c.summary, nowIso());
+  }
+
+  getLatestCompaction(sessionKey: string): Compaction | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM compactions WHERE session_key = ?
+         ORDER BY through_seq DESC LIMIT 1`,
+      )
+      .get(sessionKey) as CompactionRow | undefined;
+    if (!row) return undefined;
+    return {
+      sessionKey: row.session_key,
+      throughSeq: row.through_seq,
+      summary: row.summary,
+      createdAt: row.created_at,
+    };
   }
 
   // ── runs ──────────────────────────────────────────────────────────────────

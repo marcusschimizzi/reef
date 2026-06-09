@@ -68,6 +68,17 @@ export type ReefEvent = EventEnvelope &
         approvalId: string;
         decision: ApprovalDecision;
       }
+    // ── context management (Phase 3c) ────────────────────────────────────────
+    // Emitted when the loop folds older messages into a durable summary to stay
+    // under the context window. First-class in the native stream; the conch
+    // down-projection currently drops it (conch has no slot yet — see adapter).
+    | {
+        type: "context.compacted";
+        /** Highest message seq now represented by the summary. */
+        throughSeq: number;
+        /** How many messages were folded into the summary this round. */
+        foldedMessages: number;
+      }
     // ── reserved for later phases ────────────────────────────────────────────
     // Declared now so the protocol advertises its full intent; emitters land
     // with the memory seam (reef-docs/07) and budget threading (reef-docs/03).

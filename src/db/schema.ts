@@ -80,6 +80,19 @@ CREATE TABLE IF NOT EXISTS approvals (
 );
 CREATE INDEX IF NOT EXISTS idx_approvals_run ON approvals(run_id);
 
+-- Durable compaction checkpoints (Phase 3c). A summary that stands in for every
+-- message up to through_seq, folding long sessions back under the context window.
+-- This is a VIEW over the messages log, never a rewrite of it: getContext returns
+-- the latest summary plus the verbatim tail (messages with seq > through_seq), so
+-- the canonical conversation stays intact and re-compactable.
+CREATE TABLE IF NOT EXISTS compactions (
+  session_key TEXT NOT NULL,
+  through_seq INTEGER NOT NULL,   -- highest message seq folded into this summary
+  summary     TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  PRIMARY KEY (session_key, through_seq)
+);
+
 -- The native protocol event log (reef-docs/04 per-run event log; shape left open
 -- in reef-docs/10). Persisted so a consumer can fetch history and reconnect
 -- without replay gaps (conch's reconnect pattern). Emitter lands in Phase 2.

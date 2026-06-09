@@ -112,6 +112,23 @@ export interface Approval {
   decidedAt?: string;
 }
 
+/**
+ * A durable compaction checkpoint (Phase 3c). When a session's assembled context
+ * crosses a token threshold, the loop folds the oldest messages into a summary
+ * and records it here. Compaction is a *view* over the immutable message log, not
+ * a mutation of it: the canonical `messages` are never rewritten, so the full
+ * history stays available for audit/replay and can be re-compacted differently.
+ * The assembled context becomes `[summary] + messages where seq > throughSeq`.
+ */
+export interface Compaction {
+  sessionKey: string;
+  /** The highest message seq folded into this summary. */
+  throughSeq: number;
+  /** Prose standing in for every message up to and including throughSeq. */
+  summary: string;
+  createdAt: string;
+}
+
 export type StepState = "pending" | "committed";
 
 /**

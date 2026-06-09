@@ -152,7 +152,9 @@ export class ConchProjector {
 
       // Dropped in the down-projection — conch has no slot yet:
       // step.started, message.completed, tool.started, approval.resolved,
-      // memory.recalled, memory.recorded, budget.warning.
+      // context.compacted, memory.recalled, memory.recorded, budget.warning.
+      // (context.compacted is first-class in the native stream and shown by the
+      // dev CLI; surfacing it in conch is a deliberate Phase-2b-style extension.)
       default:
         return [];
     }

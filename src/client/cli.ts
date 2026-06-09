@@ -81,6 +81,11 @@ function render(line: string): void {
       process.stdout.write(`\n[run failed] ${e.error}\n`);
       rl.prompt();
       break;
+    case "context.compacted":
+      process.stdout.write(
+        `\n  ⊟ compacted ${e.foldedMessages} earlier message(s) into a summary\n`,
+      );
+      break;
     default:
       break;
   }
