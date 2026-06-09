@@ -69,9 +69,26 @@ describe("ConchProjector", () => {
     expect((frames[0]!.data as { stream: string }).stream).toBe("error");
   });
 
-  it("drops events conch has no slot for yet (no silent leakage)", () => {
+  it("accumulates per-step usage onto the lifecycle frame", () => {
     const p = new ConchProjector();
-    expect(p.project(ev({ ...base, type: "step.committed", index: 0 }))).toEqual([]);
+    p.project(ev({ ...base, type: "run.started", agentId: "a" }));
+    p.project(ev({ ...base, type: "step.committed", index: 0, usage: { inputTokens: 100, outputTokens: 20 } }));
+    p.project(ev({ ...base, type: "step.committed", index: 1, usage: { inputTokens: 50, outputTokens: 10 } }));
+    const frames = p.project(ev({ ...base, type: "run.completed", stopReason: "completed" }));
+    const lifecycle = frames[0]!.data as { stream: string; data: Record<string, unknown> };
+    expect(lifecycle.data.usage).toEqual({ inputTokens: 150, outputTokens: 30 });
+  });
+
+  it("drops events conch has no slot for yet (no silent leakage), but harvests step usage", () => {
+    const p = new ConchProjector();
+    // step.committed produces no frame of its own...
+    expect(p.project(ev({ ...base, type: "step.committed", index: 0, usage: { inputTokens: 5, outputTokens: 1 } }))).toEqual([]);
     expect(p.project(ev({ ...base, type: "budget.warning", spent: { inputTokens: 1, outputTokens: 1 } }))).toEqual([]);
+    // ...but its usage rode along: it shows up on the eventual lifecycle frame
+    const frames = p.project(ev({ ...base, type: "run.completed", stopReason: "completed" }));
+    expect((frames[0]!.data as { data: Record<string, unknown> }).data.usage).toEqual({
+      inputTokens: 5,
+      outputTokens: 1,
+    });
   });
 });

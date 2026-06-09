@@ -31,13 +31,27 @@ interface AgentPayload {
  * per-chunk deltas, but conch's `assistant` stream wants both the delta and the
  * cumulative text, so the projector accumulates per run.
  */
+interface RunState {
+  text: string;
+  thinking: string;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+const freshState = (): RunState => ({
+  text: "",
+  thinking: "",
+  inputTokens: 0,
+  outputTokens: 0,
+});
+
 export class ConchProjector {
-  private readonly cumulative = new Map<string, { text: string; thinking: string }>();
+  private readonly cumulative = new Map<string, RunState>();
 
   project(event: ReefEvent): ConchFrame[] {
     switch (event.type) {
       case "run.started":
-        this.cumulative.set(event.runId, { text: "", thinking: "" });
+        this.cumulative.set(event.runId, freshState());
         return [this.typing(event, "start")];
 
       case "message.delta": {
@@ -98,18 +112,36 @@ export class ConchProjector {
       case "run.resumed":
         return [this.typing(event, "start")];
 
+      // Not forwarded as its own frame, but harvested: per-step usage
+      // accumulates into the run total that rides the lifecycle frame, so
+      // conch's dormant cost columns get populated (Phase 2b).
+      case "step.committed": {
+        const state = this.acc(event.runId);
+        if (event.usage) {
+          state.inputTokens += event.usage.inputTokens;
+          state.outputTokens += event.usage.outputTokens;
+        }
+        return [];
+      }
+
       case "run.completed": {
+        const usage = this.usageOf(event.runId);
         this.cumulative.delete(event.runId);
         return [
-          this.agent(event, "lifecycle", { status: "completed", stopReason: event.stopReason }),
+          this.agent(event, "lifecycle", {
+            status: "completed",
+            stopReason: event.stopReason,
+            usage,
+          }),
           this.typing(event, "stop"),
         ];
       }
 
       case "run.failed": {
+        const usage = this.usageOf(event.runId);
         this.cumulative.delete(event.runId);
         return [
-          this.agent(event, "error", { error: event.error }),
+          this.agent(event, "error", { error: event.error, usage }),
           this.typing(event, "stop"),
         ];
       }
@@ -118,21 +150,26 @@ export class ConchProjector {
         // approval.requested (if any) already fired; the UI is no longer "typing"
         return [this.typing(event, "stop")];
 
-      // Dropped in the down-projection — conch has no slot yet (Phase 2b):
-      // step.started, step.committed, message.completed, tool.started,
-      // approval.resolved, memory.recalled, memory.recorded, budget.warning.
+      // Dropped in the down-projection — conch has no slot yet:
+      // step.started, message.completed, tool.started, approval.resolved,
+      // memory.recalled, memory.recorded, budget.warning.
       default:
         return [];
     }
   }
 
-  private acc(runId: string): { text: string; thinking: string } {
+  private acc(runId: string): RunState {
     let state = this.cumulative.get(runId);
     if (!state) {
-      state = { text: "", thinking: "" };
+      state = freshState();
       this.cumulative.set(runId, state);
     }
     return state;
+  }
+
+  private usageOf(runId: string): { inputTokens: number; outputTokens: number } {
+    const state = this.acc(runId);
+    return { inputTokens: state.inputTokens, outputTokens: state.outputTokens };
   }
 
   private agent(
