@@ -3,79 +3,36 @@
 // resolution (the technique behind polished CLI mascots). 'o' = body,
 // 'h' = highlight, 'e' = eye, '.' = empty.
 //
-// Variants explore different ARM stances over the same elongated mantle; switch
-// with REEF_AVATAR to compare live. (The mantle shape is settled — `pixel`.)
+// The settled octopus: elongated mantle, two eyes, arms splaying out with a curl
+// at the tips and an OPEN center (no straight-down central arm — that read as a
+// "nose"). Kept in a registry so new arm stances can be added + compared via
+// REEF_AVATAR when we refine further.
 
 export interface Avatar {
   rows: string[];
 }
 
-// Shared elongated mantle (rows 0–12) — the octopus head. Each variant appends
-// its own tentacle stance.
-const MANTLE = [
-  "......oooooo......",
-  ".....ohhhhhho.....",
-  "....ohhhhhhhho....",
-  "...ohhhhhhhhhho...",
-  "..ohhhhhhhhhhhho..",
-  "..oooooooooooooo..",
-  "..oooooooooooooo..",
-  "..oooeeooooeeooo..",
-  "..oooeeooooeeooo..",
-  "..oooooooooooooo..",
-  "...oooooooooooo...",
-  "...oooooooooooo...",
-  "....oooooooooo....",
-];
-
 export const AVATARS: Record<string, Avatar> = {
-  // Default — arms splay outward with a curl at the tips, center left OPEN (no
-  // straight-down central arm, which read as a "nose").
   pixel: {
     rows: [
-      ...MANTLE,
+      "......oooooo......",
+      ".....ohhhhhho.....",
+      "....ohhhhhhhho....",
+      "...ohhhhhhhhhho...",
+      "..ohhhhhhhhhhhho..",
+      "..oooooooooooooo..",
+      "..oooooooooooooo..",
+      "..oooeeooooeeooo..",
+      "..oooeeooooeeooo..",
+      "..oooooooooooooo..",
+      "...oooooooooooo...",
+      "...oooooooooooo...",
+      "....oooooooooo....",
       "..oo.oo....oo.oo..",
       ".oo..oo....oo..oo.",
       "oo...o......o...oo",
       "o....oo....oo....o",
       "oo....o....o....oo",
-    ],
-  },
-  // Arms sweep wide to the edges, then hook back inward — a dramatic curl.
-  "pixel-curl": {
-    rows: [
-      ...MANTLE,
-      "..oo.oo....oo.oo..",
-      ".oo..oo....oo..oo.",
-      "oo...oo....oo...oo",
-      "oo..o........o..oo",
-      ".oo............oo.",
-      "..o............o..",
-    ],
-  },
-  // Arms hang on the sides in two soft clusters — a calm, resting stance.
-  "pixel-hang": {
-    rows: [
-      ...MANTLE,
-      "..oo.oo....oo.oo..",
-      "..o.o........o.o..",
-      "..o.o........o.o..",
-      "..oo.o......o.oo..",
-      "...o..........o...",
-    ],
-  },
-  // Asymmetric — one arm raised to the upper-left and curling (a friendly wave),
-  // the rest splaying down-right. Center open.
-  "pixel-wave": {
-    rows: [
-      ...MANTLE.slice(0, 10),
-      "oo.oooooooooooo...",
-      ".oo.oooooooooo....",
-      "..oo.oooooooo.....",
-      "...oo.oo..oo.oo...",
-      "..o...oo..oo...o..",
-      ".....o......o.....",
-      ".....oo....oo.....",
     ],
   },
 };
