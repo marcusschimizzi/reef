@@ -225,6 +225,28 @@ function finalizeStream(state: TranscriptState): TranscriptState {
   );
 }
 
+/**
+ * A "live" item is still mutating (a streaming reply, a running tool, a pending
+ * approval); everything else is final. Because the loop runs sequentially, live
+ * items are always a trailing suffix — so the transcript splits cleanly into a
+ * finalized prefix (safe to commit to Ink's <Static> scrollback) and a live
+ * tail (re-rendered each frame).
+ */
+export function isLive(item: TranscriptItem): boolean {
+  if (item.kind === "assistant") return item.streaming;
+  if (item.kind === "tool") return item.status === "pending" || item.status === "running";
+  if (item.kind === "approval") return item.status === "pending";
+  return false;
+}
+
+export function splitTranscript(items: TranscriptItem[]): {
+  done: TranscriptItem[];
+  live: TranscriptItem[];
+} {
+  const i = items.findIndex(isLive);
+  return i === -1 ? { done: items, live: [] } : { done: items.slice(0, i), live: items.slice(i) };
+}
+
 /** Approvals still awaiting a decision — drives the TUI's input focus. */
 export function pendingApprovals(
   state: TranscriptState,

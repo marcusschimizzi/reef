@@ -5,6 +5,7 @@ import {
   pushNotice,
   pushUser,
   reduceEvent,
+  splitTranscript,
   type TranscriptItem,
   type TranscriptState,
 } from "../../src/client/tui/transcript.js";
@@ -90,6 +91,29 @@ describe("transcript reducer", () => {
     const failed = reduceEvent(initialState, ev({ type: "run.failed", error: "kaboom" }));
     expect(lastOf(failed, "error").text).toBe("kaboom");
     expect(failed.status).toBe("idle");
+  });
+
+  it("splits the finalized prefix from the live (still-mutating) tail", () => {
+    // a completed exchange, then a streaming reply in flight
+    const s = run(
+      ev({ type: "message.delta", text: "hi" }),
+      ev({ type: "run.completed", stopReason: "completed" }),
+      ev({ type: "tool.requested", toolUseId: "t1", name: "echo", input: {}, needsApproval: false }),
+      ev({ type: "tool.completed", toolUseId: "t1", output: 1 }),
+      ev({ type: "message.delta", text: "stream" }), // live: streaming assistant
+    );
+    const { done, live } = splitTranscript(s.items);
+    expect(live).toHaveLength(1);
+    expect(live[0]).toMatchObject({ kind: "assistant", streaming: true });
+    expect(done.every((i) => !(i.kind === "assistant" && i.streaming))).toBe(true);
+
+    // a fully settled transcript has no live tail
+    const settled = reduceEvent(s, ev({ type: "run.completed", stopReason: "completed" }));
+    expect(splitTranscript(settled.items).live).toHaveLength(0);
+
+    // a running tool is live
+    const tool = run(ev({ type: "tool.requested", toolUseId: "t9", name: "x", input: {}, needsApproval: false }));
+    expect(splitTranscript(tool.items).live[0]).toMatchObject({ kind: "tool", status: "pending" });
   });
 
   it("supports local user + notice items", () => {

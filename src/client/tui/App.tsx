@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { Box, Text, useApp, useInput } from "ink";
+import { Box, Static, Text, useApp, useInput, useStdout } from "ink";
 import TextInput from "ink-text-input";
 import { PROMPT } from "./avatar.js";
 import {
   Banner,
   CommandPalette,
+  ItemView,
   StatusBar,
   Transcript,
   type Command,
@@ -18,8 +19,12 @@ import {
   pushNotice,
   pushUser,
   reduceEvent,
+  splitTranscript,
   type TranscriptState,
 } from "./transcript.js";
+
+// Clear screen + scrollback + home cursor — for /clear and /new.
+const CLEAR_SCREEN = "\x1B[2J\x1B[3J\x1B[H";
 
 const COMMANDS: Command[] = [
   { name: "help", description: "show available commands" },
@@ -41,11 +46,15 @@ export interface AppProps {
 
 export function App({ socketPath, session }: AppProps) {
   const { exit } = useApp();
+  const { stdout } = useStdout();
   const theme = resolveTheme();
   const [state, setState] = useState<TranscriptState>(initialState);
   const [input, setInput] = useState("");
   const [selected, setSelected] = useState(0);
   const [conn, setConn] = useState<ConnStatus>("connecting");
+  // Bumped on /clear and /new to remount <Static> (its committed-line count must
+  // reset, or it won't print anything after the transcript shrinks).
+  const [generation, setGeneration] = useState(0);
   const connRef = useRef<Connection | null>(null);
   const sessionKey = useRef(`cli:${Date.now()}`);
 
@@ -115,11 +124,15 @@ export function App({ socketPath, session }: AppProps) {
         setState((s) => pushNotice(s, "requested stop"));
         break;
       case "clear":
+        stdout.write(CLEAR_SCREEN);
         setState(() => initialState);
+        setGeneration((g) => g + 1);
         break;
       case "new":
         sessionKey.current = `cli:${Date.now()}`;
+        stdout.write(CLEAR_SCREEN);
         setState(() => ({ ...initialState }));
+        setGeneration((g) => g + 1);
         break;
       case "quit":
       case "exit":
@@ -131,10 +144,27 @@ export function App({ socketPath, session }: AppProps) {
     }
   }
 
+  // Finalized items (+ the banner) commit to scrollback via <Static> and never
+  // re-render; only the live tail + input region repaint each frame.
+  const { done, live } = splitTranscript(state.items);
+  const staticEntries: Array<{ key: string; item?: TranscriptState["items"][number] }> = [
+    { key: "banner" },
+    ...done.map((item) => ({ key: `i${item.id}`, item })),
+  ];
+
   return (
     <Box flexDirection="column">
-      <Banner theme={theme} session={session} />
-      <Transcript theme={theme} items={state.items} activeApprovalId={active?.approvalId} />
+      <Static key={generation} items={staticEntries}>
+        {(entry) =>
+          entry.item ? (
+            <ItemView key={entry.key} theme={theme} item={entry.item} />
+          ) : (
+            <Banner key={entry.key} theme={theme} session={session} />
+          )
+        }
+      </Static>
+
+      <Transcript theme={theme} items={live} activeApprovalId={active?.approvalId} />
 
       <Box marginTop={1} flexDirection="column">
         {showPalette ? <CommandPalette theme={theme} matches={matches} selected={selected} /> : null}
