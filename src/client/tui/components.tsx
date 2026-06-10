@@ -1,11 +1,45 @@
+import type { ReactNode } from "react";
 import { Box, Text } from "ink";
 import Spinner from "ink-spinner";
-import { OCTOPUS, WORDMARK, TAGLINE } from "./avatar.js";
+import { resolveAvatar, WORDMARK, TAGLINE, type Avatar } from "./avatar.js";
 import type { Theme } from "./theme.js";
 import type { RunStatus, TranscriptItem, UsageTotals } from "./transcript.js";
 
-// Presentational Ink components. All color comes from the active Theme (passed
-// down), so re-skinning is a theme swap and these never name a raw color.
+const EYE = "#1b1f24"; // near-black eyes read as holes in the colored body
+
+/** Render a pixel grid as half-block rows: two pixel rows per text row, using
+ *  ▀ with fg = top pixel and bg = bottom pixel (doubling vertical resolution). */
+function PixelSprite({ rows, body }: { rows: string[]; body: string }) {
+  const colorOf = (ch: string | undefined): string | undefined =>
+    ch === "o" ? body : ch === "e" ? EYE : undefined;
+  const lines: ReactNode[] = [];
+  for (let y = 0; y < rows.length; y += 2) {
+    const top = rows[y] ?? "";
+    const bot = rows[y + 1] ?? "";
+    const width = Math.max(top.length, bot.length);
+    const cells: ReactNode[] = [];
+    for (let x = 0; x < width; x++) {
+      const t = colorOf(top[x]);
+      const b = colorOf(bot[x]);
+      if (t && b) cells.push(<Text key={x} color={t} backgroundColor={b}>▀</Text>);
+      else if (t) cells.push(<Text key={x} color={t}>▀</Text>);
+      else if (b) cells.push(<Text key={x} color={b}>▄</Text>);
+      else cells.push(<Text key={x}> </Text>);
+    }
+    lines.push(<Box key={y}>{cells}</Box>);
+  }
+  return <Box flexDirection="column">{lines}</Box>;
+}
+
+export function AvatarArt({ theme, avatar }: { theme: Theme; avatar: Avatar }) {
+  if (avatar.kind === "pixel") return <PixelSprite rows={avatar.rows} body={theme.primary} />;
+  return <Text color={theme.primary}>{avatar.art}</Text>;
+}
+
+// Presentational Ink components. Color is an accent only (see theme.ts): body
+// text is left as the terminal's own foreground; the palette is spent on the
+// brand, borders, de-emphasis, and semantic state. The launch banner is the one
+// place that leans into color — it's the splash.
 
 export interface SessionInfo {
   cwd: string;
@@ -18,7 +52,7 @@ export function Banner({ theme, session }: { theme: Theme; session: SessionInfo 
     <Box flexDirection="column" marginBottom={1}>
       <Box>
         <Box flexDirection="column" marginRight={3}>
-          <Text color={theme.primary}>{OCTOPUS}</Text>
+          <AvatarArt theme={theme} avatar={resolveAvatar()} />
         </Box>
         <Box flexDirection="column">
           <Text color={theme.primary}>{WORDMARK}</Text>
@@ -38,7 +72,7 @@ export function Banner({ theme, session }: { theme: Theme; session: SessionInfo 
           {session.branch ? <Text color={theme.secondary}>  ⎇ {session.branch}</Text> : null}
         </Text>
         <Text color={theme.muted}>
-          agent <Text color={theme.assistant}>{session.agentId}</Text>
+          agent <Text color={theme.primary}>{session.agentId}</Text>
         </Text>
       </Box>
       <Text color={theme.muted}>  type a message, or /help for commands</Text>
@@ -58,21 +92,21 @@ function summarize(value: unknown, max = 100): string {
 }
 
 function ToolView({ theme, item }: { theme: Theme; item: Extract<TranscriptItem, { kind: "tool" }> }) {
-  const glyph =
-    item.status === "ok" ? "✓" : item.status === "error" ? "✗" : item.status === "running" ? "" : "·";
-  const glyphColor =
-    item.status === "ok" ? theme.ok : item.status === "error" ? theme.error : theme.tool;
   return (
     <Box flexDirection="column">
-      <Text>
-        <Text color={theme.tool}>⚙ {item.name}</Text>
+      <Text color={theme.muted}>
+        <Text color={theme.secondary}>⚙</Text> <Text>{item.name}</Text>
         <Text color={theme.muted}>({summarize(item.input, 60)})</Text>{" "}
         {item.status === "running" ? (
-          <Text color={theme.tool}>
+          <Text color={theme.secondary}>
             <Spinner type="dots" />
           </Text>
+        ) : item.status === "ok" ? (
+          <Text color={theme.ok}>✓</Text>
+        ) : item.status === "error" ? (
+          <Text color={theme.error}>✗</Text>
         ) : (
-          <Text color={glyphColor}>{glyph}</Text>
+          <Text color={theme.muted}>·</Text>
         )}
       </Text>
       {item.status === "ok" && item.output !== undefined ? (
@@ -97,11 +131,11 @@ export function ApprovalCard({
   const border =
     item.status === "allowed" ? theme.ok : item.status === "denied" ? theme.error : theme.warn;
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={border} paddingX={1} marginY={1}>
+    <Box flexDirection="column" borderStyle="round" borderColor={border} paddingX={1} marginY={1} alignSelf="flex-start">
       <Text color={border}>
         {item.status === "pending" ? "⚠ approval needed" : `approval ${item.status}`}
       </Text>
-      <Text color={theme.user}>{item.action}</Text>
+      <Text>{item.action}</Text>
       {active && item.status === "pending" ? (
         <Text color={theme.muted}>
           <Text color={theme.ok}>[a]</Text> allow once {"  "}
@@ -127,7 +161,7 @@ export function ItemView({
       return (
         <Text>
           <Text color={theme.muted}>you </Text>
-          <Text color={theme.user}>{item.text}</Text>
+          {item.text}
         </Text>
       );
     case "assistant":
@@ -136,7 +170,7 @@ export function ItemView({
           <Text color={theme.primary} bold>
             reef{" "}
           </Text>
-          <Text color={theme.assistant}>{item.text}</Text>
+          {item.text}
           {item.streaming ? <Text color={theme.muted}>▌</Text> : null}
         </Text>
       );
@@ -153,7 +187,12 @@ export function ItemView({
     case "notice":
       return <Text color={theme.muted}>⊙ {item.text}</Text>;
     case "error":
-      return <Text color={theme.error}>✗ {item.text}</Text>;
+      return (
+        <Text>
+          <Text color={theme.error}>✗ </Text>
+          {item.text}
+        </Text>
+      );
   }
 }
 
@@ -169,9 +208,7 @@ export function Transcript({
   return (
     <Box flexDirection="column">
       {items.map((item) => (
-        <Box key={item.id} marginBottom={item.kind === "tool" || item.kind === "approval" ? 0 : 0}>
-          <ItemView theme={theme} item={item} activeApprovalId={activeApprovalId} />
-        </Box>
+        <ItemView key={item.id} theme={theme} item={item} activeApprovalId={activeApprovalId} />
       ))}
     </Box>
   );
@@ -192,8 +229,11 @@ export function StatusBar({
     <Box justifyContent="space-between">
       <Box>
         {status === "working" ? (
-          <Text color={theme.primary}>
-            <Spinner type="dots" /> <Text color={theme.muted}>working…</Text>
+          <Text color={theme.muted}>
+            <Text color={theme.primary}>
+              <Spinner type="dots" />
+            </Text>{" "}
+            working…
           </Text>
         ) : status === "awaiting_approval" ? (
           <Text color={theme.warn}>● awaiting approval</Text>

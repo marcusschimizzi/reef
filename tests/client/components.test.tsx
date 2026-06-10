@@ -12,7 +12,7 @@ describe("TUI components", () => {
     );
     const out = lastFrame() ?? "";
     expect(out).toContain("█"); // the REEF block wordmark
-    expect(out).toContain("◕"); // the octopus
+    expect(out).toContain("▀"); // the half-block octopus sprite (default avatar)
     expect(out).toContain("your always-on agent");
     expect(out).toContain("/home/marcus/dev/reef");
     expect(out).toContain("main");

@@ -1,43 +1,37 @@
 // Reef's TUI palette. Two themes ship; `REEF_THEME=purple` switches at launch so
 // the look can be compared live in-terminal rather than chosen from a swatch.
-// Colors are truecolor hex (Ink renders them where supported, degrading on
-// 16-color terminals). Semantic names — not raw colors — are used everywhere in
-// the UI, so re-theming is a single edit here.
+//
+// Restraint is the rule: color is an ACCENT, not the body. Message text, tool
+// names, and the like render in the terminal's own foreground (no color set);
+// the palette is spent only on the brand (wordmark/avatar/agent label), on
+// borders, on de-emphasis (muted), and on semantic state (ok/warn/error). Using
+// semantic names everywhere — never raw colors — keeps re-theming a single edit.
 
 export interface Theme {
   name: string;
-  /** Primary brand color — wordmark, the agent's name, active accents. */
+  /** Brand accent — wordmark, the agent's name label, the working spinner. */
   primary: string;
-  /** Secondary brand color — frames, the avatar body, panel borders. */
+  /** Secondary brand — frames/borders, the avatar, tool glyphs, the branch tag. */
   secondary: string;
-  /** Assistant message text. */
-  assistant: string;
-  /** The user's own text / label. */
-  user: string;
-  /** Tool calls and their machinery. */
-  tool: string;
-  /** Success (tool ok, connected). */
-  ok: string;
-  /** Warnings / approvals / attention. */
-  warn: string;
-  /** Errors / denials / failures. */
-  error: string;
-  /** De-emphasized text — hints, thinking, timestamps, separators. */
+  /** De-emphasized text — labels, hints, tool args/results, notices, status. */
   muted: string;
+  /** Success — a tool completed, connected. */
+  ok: string;
+  /** Attention — approvals, warnings. */
+  warn: string;
+  /** Failure — denials, errors. */
+  error: string;
 }
 
-// Coral-on-teal: an underwater-but-alive reef. Teal/aqua structure, coral accent.
+// Coral-on-teal: an underwater-but-alive reef. Coral brand accent, teal structure.
 const coral: Theme = {
   name: "coral",
   primary: "#ff8c69", // coral
   secondary: "#2dd4bf", // teal/aqua
-  assistant: "#5eead4", // soft aqua
-  user: "#e7e5d8", // warm foam
-  tool: "#38bdf8", // shallow-water blue
+  muted: "#7d8a99", // sand-grey
   ok: "#34d399", // sea green
   warn: "#fbbf24", // sunlit amber
-  error: "#fb7185", // warning coral-red
-  muted: "#7d8a99", // sand-grey
+  error: "#fb7185", // coral-red
 };
 
 // Purple direction: a deeper, more nocturnal reef glow.
@@ -45,13 +39,10 @@ const purple: Theme = {
   name: "purple",
   primary: "#c084fc", // bright violet
   secondary: "#8b5cf6", // amethyst
-  assistant: "#d8b4fe", // soft lavender
-  user: "#ece9f5", // pale foam
-  tool: "#60a5fa", // periwinkle blue
+  muted: "#8b8298", // dusk-grey
   ok: "#34d399",
   warn: "#fbbf24",
   error: "#fb7185",
-  muted: "#8b8298",
 };
 
 const THEMES: Record<string, Theme> = { coral, purple };
