@@ -16,6 +16,7 @@ import { Spine } from "../db/spine.js";
 import { BoundFs } from "../fs/capability.js";
 import { runAgentLoop, type LoopOptions } from "../loop/AgentLoop.js";
 import { assertValidSpec, nextFireTime } from "../triggers/schedule.js";
+import { DefaultGate, type ProactiveGate } from "../triggers/gate.js";
 import { Scheduler, DEFAULT_TICK_MS } from "./Scheduler.js";
 import { VercelRouter, type ModelRouter } from "../model/router.js";
 import type { MemoryStore } from "../memory/seam.js";
@@ -42,7 +43,17 @@ export interface DaemonOptions {
   memory?: MemoryFactory;
   /** Scheduler tick cadence in ms (how often due triggers are reconciled). */
   tickMs?: number;
+  /** Proactive gate governing heartbeat fires; defaults to idle-only (DefaultGate). */
+  gate?: ProactiveGate;
 }
+
+/** Default self-maintenance instruction for a heartbeat trigger (Phase 4b). */
+const DEFAULT_HEARTBEAT_PROMPT =
+  "This is an automatic self-maintenance check, not a message from the user. " +
+  "Quietly review anything notable from recent activity: record durable facts " +
+  "worth keeping with record_memory, and correct or tidy existing memories if " +
+  "needed. Only surface something to the user if it is genuinely important or " +
+  "time-sensitive. If nothing needs attention, finish without taking action.";
 
 interface Wake {
   sessionKey: string;
@@ -81,6 +92,7 @@ export class Daemon {
   /** One memory store per agent, built lazily and reused across that agent's runs. */
   private readonly memories = new Map<string, MemoryStore>();
   private readonly scheduler: Scheduler;
+  private readonly gate: ProactiveGate;
   /** Abort handles for in-flight runs, keyed by session — powers cancellation. */
   private readonly aborters = new Map<string, AbortController>();
 
@@ -91,6 +103,7 @@ export class Daemon {
     this.workspaceDir = opts.workspaceDir;
     this.maxSteps = opts.maxSteps ?? 20;
     this.scheduler = new Scheduler(() => this.tickTriggers(), opts.tickMs ?? DEFAULT_TICK_MS);
+    this.gate = opts.gate ?? new DefaultGate();
     // Default memory: the SQLite/FTS5 store sharing the spine's connection,
     // scoped per agent so agents never see each other's memory.
     this.memoryFactory =
@@ -212,6 +225,29 @@ export class Daemon {
     return this.spine.listTriggers(agentId);
   }
 
+  /**
+   * Find-or-create the agent's self-maintenance heartbeat (Phase 4b) — one per
+   * agent, idempotent across restarts. Heartbeats use `skip` catch-up (a missed
+   * one shouldn't fire a burst on restart) and yield to the proactive gate.
+   */
+  ensureHeartbeat(input: {
+    agentId: string;
+    intervalSeconds: number;
+    input?: string;
+  }): Trigger {
+    const existing = this.spine
+      .listTriggers(input.agentId)
+      .find((t) => t.type === "heartbeat");
+    if (existing) return existing;
+    return this.createTrigger({
+      agentId: input.agentId,
+      type: "heartbeat",
+      spec: { kind: "interval", seconds: input.intervalSeconds },
+      input: input.input ?? DEFAULT_HEARTBEAT_PROMPT,
+      catchUpPolicy: "skip",
+    });
+  }
+
   setTriggerEnabled(id: string, enabled: boolean): boolean {
     const t = this.spine.getTrigger(id);
     if (!t) return false;
@@ -234,17 +270,29 @@ export class Daemon {
   async tickTriggers(now: Date = new Date()): Promise<void> {
     const nowMs = now.getTime();
     for (const t of this.spine.getDueTriggers(now.toISOString())) {
-      const next = nextFireTime(t.spec, now);
+      let fire = true;
+
+      // A due fire much older than now was missed during downtime; `skip` drops it.
+      const dueMs = t.nextFireAt ? Date.parse(t.nextFireAt) : nowMs;
+      if (nowMs - dueMs > MISSED_GRACE_MS && t.catchUpPolicy === "skip") fire = false;
+
+      // Opportunistic self-maintenance yields to the proactive gate (e.g. when busy).
+      if (fire && t.type === "heartbeat") {
+        const decision = await this.gate.check({
+          now,
+          busy: this.aborters.size > 0,
+          trigger: t,
+        });
+        if (!decision.allow) fire = false;
+      }
+
+      // Always advance the schedule; only stamp lastFiredAt on an actual fire.
       this.spine.updateTriggerSchedule(t.id, {
-        nextFireAt: next?.toISOString(),
-        lastFiredAt: now.toISOString(),
+        nextFireAt: nextFireTime(t.spec, now)?.toISOString(),
+        lastFiredAt: fire ? now.toISOString() : t.lastFiredAt,
       });
 
-      const dueMs = t.nextFireAt ? Date.parse(t.nextFireAt) : nowMs;
-      const missed = nowMs - dueMs > MISSED_GRACE_MS;
-      if (missed && t.catchUpPolicy === "skip") continue; // drop the missed fire
-
-      await this.inbox.enqueue({ kind: "trigger", triggerId: t.id });
+      if (fire) await this.inbox.enqueue({ kind: "trigger", triggerId: t.id });
     }
   }
 

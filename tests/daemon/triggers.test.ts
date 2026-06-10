@@ -6,6 +6,7 @@ import { Daemon } from "../../src/daemon/Daemon.js";
 import type { AgentRecord } from "../../src/core/types.js";
 import type { ModelRouter, ModelTurn, ModelTurnInput } from "../../src/model/router.js";
 import type { ReefEvent } from "../../src/protocol/events.js";
+import type { ProactiveGate } from "../../src/triggers/gate.js";
 
 const dirs: string[] = [];
 function tempDir(): string {
@@ -117,6 +118,67 @@ describe("scheduled triggers", () => {
     });
     await daemon.tickTriggers(wayLater());
     expect(router.calls).toBe(0);
+    daemon.close();
+  });
+
+  it("fires a heartbeat as a proactive run when the gate allows", async () => {
+    const { daemon, events, router } = makeDaemon(tempDir());
+    const hb = daemon.ensureHeartbeat({ agentId: "reef", intervalSeconds: 60 });
+    expect(hb.type).toBe("heartbeat");
+    expect(hb.catchUpPolicy).toBe("skip");
+
+    await daemon.tickTriggers(soon());
+    expect(router.calls).toBe(1);
+    const started = events.find((e) => e.type === "run.started");
+    expect(started).toMatchObject({ source: { triggerType: "heartbeat" } });
+    daemon.close();
+  });
+
+  it("ensureHeartbeat is idempotent — one heartbeat per agent across calls", () => {
+    const { daemon } = makeDaemon(tempDir());
+    const a = daemon.ensureHeartbeat({ agentId: "reef", intervalSeconds: 60 });
+    const b = daemon.ensureHeartbeat({ agentId: "reef", intervalSeconds: 120 });
+    expect(b.id).toBe(a.id);
+    expect(daemon.listTriggers("reef").filter((t) => t.type === "heartbeat")).toHaveLength(1);
+    daemon.close();
+  });
+
+  it("the proactive gate suppresses a heartbeat fire but still reschedules it", async () => {
+    const denyGate: ProactiveGate = { check: () => ({ allow: false, reason: "busy" }) };
+    const router = new CompletingRouter();
+    const dir = tempDir();
+    const daemon = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      router,
+      gate: denyGate,
+    });
+    daemon.registerAgent(agent);
+    const hb = daemon.ensureHeartbeat({ agentId: "reef", intervalSeconds: 60 });
+
+    await daemon.tickTriggers(soon());
+    expect(router.calls).toBe(0); // gate suppressed the fire
+    const after = daemon.spine.getTrigger(hb.id);
+    expect(after?.lastFiredAt).toBeUndefined(); // never actually fired
+    expect(Date.parse(after!.nextFireAt!)).toBeGreaterThan(Date.now()); // but rescheduled
+    daemon.close();
+  });
+
+  it("a schedule trigger is NOT gated — it fires even when a heartbeat would not", async () => {
+    const denyGate: ProactiveGate = { check: () => ({ allow: false }) };
+    const router = new CompletingRouter();
+    const dir = tempDir();
+    const daemon = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      router,
+      gate: denyGate,
+    });
+    daemon.registerAgent(agent);
+    daemon.createTrigger({ agentId: "reef", spec: { kind: "interval", seconds: 60 }, input: "routine" });
+
+    await daemon.tickTriggers(soon());
+    expect(router.calls).toBe(1); // schedule triggers ignore the proactive gate
     daemon.close();
   });
 

@@ -138,8 +138,12 @@ export type RunSource =
   | { kind: "message" }
   | { kind: "trigger"; triggerId: string; triggerType: TriggerType };
 
-/** A wake source beyond the inbound message (Phase 4). v1 ships `schedule`. */
-export type TriggerType = "schedule";
+/**
+ * A wake source beyond the inbound message (Phase 4). `schedule` = a
+ * user-intended routine that fires on time; `heartbeat` = opportunistic
+ * self-maintenance that yields to the proactive gate when reef is busy.
+ */
+export type TriggerType = "schedule" | "heartbeat";
 
 /** When a trigger fires (Phase 4a). v1 ships cron and fixed interval. */
 export type TriggerSpec =

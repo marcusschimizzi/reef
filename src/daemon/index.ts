@@ -12,6 +12,8 @@ const STATE_DIR = resolve(".reef");
 const SOCKET_PATH = join(STATE_DIR, "reef.sock");
 const HTTP_PORT = Number(process.env.REEF_HTTP_PORT ?? 9876);
 const HTTP_API_KEY = process.env.REEF_API_KEY || undefined;
+// Self-maintenance heartbeat cadence; 0 / unset = no heartbeat (opt-in).
+const HEARTBEAT_MINUTES = Number(process.env.REEF_HEARTBEAT_MINUTES ?? 0);
 mkdirSync(STATE_DIR, { recursive: true });
 
 // The one v1 agent. "Add an agent" later is another record, not new code.
@@ -49,6 +51,12 @@ daemon.registerAgent(DEFAULT_AGENT);
 
 await daemon.recover();
 daemon.start(); // begin firing scheduled triggers
+if (HEARTBEAT_MINUTES > 0) {
+  daemon.ensureHeartbeat({
+    agentId: DEFAULT_AGENT.id,
+    intervalSeconds: HEARTBEAT_MINUTES * 60,
+  });
+}
 
 const server = startSocketServer(daemon, SOCKET_PATH, DEFAULT_AGENT.id);
 const httpServer = startHttpInterface(daemon, {
