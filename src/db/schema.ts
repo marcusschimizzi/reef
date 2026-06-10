@@ -93,6 +93,26 @@ CREATE TABLE IF NOT EXISTS compactions (
   PRIMARY KEY (session_key, through_seq)
 );
 
+-- Durable trigger records (Phase 4a): wake sources beyond the inbound message.
+-- The scheduler ticks, finds rows due (enabled AND next_fire_at <= now), enqueues
+-- a wake, and recomputes next_fire_at — so triggers survive restart and missed
+-- fires are reconciled by policy, not lost.
+CREATE TABLE IF NOT EXISTS triggers (
+  id              TEXT PRIMARY KEY,
+  agent_id        TEXT NOT NULL,
+  type            TEXT NOT NULL,    -- schedule | (heartbeat | file_watch later)
+  spec            TEXT NOT NULL,    -- JSON TriggerSpec (cron | interval)
+  input           TEXT NOT NULL,    -- instruction rendered into the wake message
+  session_key     TEXT NOT NULL,    -- stable session for this trigger's runs
+  enabled         INTEGER NOT NULL, -- 0 | 1
+  catch_up_policy TEXT NOT NULL,    -- fire_once | skip
+  next_fire_at    TEXT,             -- ISO-8601; null once exhausted
+  last_fired_at   TEXT,
+  created_at      TEXT NOT NULL,
+  FOREIGN KEY (agent_id) REFERENCES agents(id)
+);
+CREATE INDEX IF NOT EXISTS idx_triggers_due ON triggers(enabled, next_fire_at);
+
 -- The native protocol event log (reef-docs/04 per-run event log; shape left open
 -- in reef-docs/10). Persisted so a consumer can fetch history and reconnect
 -- without replay gaps (conch's reconnect pattern). Emitter lands in Phase 2.

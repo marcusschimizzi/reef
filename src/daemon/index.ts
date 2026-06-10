@@ -48,6 +48,7 @@ const daemon = new Daemon({
 daemon.registerAgent(DEFAULT_AGENT);
 
 await daemon.recover();
+daemon.start(); // begin firing scheduled triggers
 
 const server = startSocketServer(daemon, SOCKET_PATH, DEFAULT_AGENT.id);
 const httpServer = startHttpInterface(daemon, {

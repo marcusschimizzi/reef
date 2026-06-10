@@ -1,5 +1,6 @@
 import http from "node:http";
 import type { Daemon } from "../daemon/Daemon.js";
+import type { TriggerSpec } from "../core/types.js";
 import { ConchProjector } from "./adapters/conch.js";
 
 // Reef's HTTP + SSE interface — the front door consumers like conch attach to
@@ -61,6 +62,40 @@ async function handle(
     // fire-and-forget: progress + errors arrive on the SSE stream
     void daemon.submit({ sessionKey, agentId, message });
     return sendJson(res, 202, { ok: true });
+  }
+
+  if (path === "/v1/triggers") {
+    if (method === "GET") {
+      const agentId = url.searchParams.get("agentId") || undefined;
+      return sendJson(res, 200, { ok: true, triggers: daemon.listTriggers(agentId) });
+    }
+    if (method === "POST") {
+      const body = await readJson(req);
+      const spec = body.spec as TriggerSpec | undefined;
+      const instruction = str(body.input);
+      if (!spec || !instruction) {
+        return sendJson(res, 400, { ok: false, error: "spec and input required" });
+      }
+      const agentId = str(body.agentId) || opts.defaultAgentId;
+      try {
+        const trigger = daemon.createTrigger({
+          agentId,
+          spec,
+          input: instruction,
+          catchUpPolicy: body.catchUpPolicy === "skip" ? "skip" : "fire_once",
+        });
+        return sendJson(res, 201, { ok: true, trigger });
+      } catch (err) {
+        return sendJson(res, 400, { ok: false, error: String(err) });
+      }
+    }
+  }
+
+  const triggerToggle = path.match(/^\/v1\/triggers\/([^/]+)\/(enable|disable)$/);
+  if (method === "POST" && triggerToggle) {
+    const id = decodeURIComponent(triggerToggle[1] ?? "");
+    const ok = daemon.setTriggerEnabled(id, triggerToggle[2] === "enable");
+    return sendJson(res, ok ? 200 : 404, { ok });
   }
 
   if (method === "POST" && path === "/v1/stop") {

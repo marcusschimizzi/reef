@@ -4,6 +4,7 @@ import type {
   AgentRecord,
   ContentBlock,
   Run,
+  RunSource,
   RunStatus,
   StopReason,
 } from "../core/types.js";
@@ -31,6 +32,9 @@ export interface LoopOptions {
   /** Resume a run that was suspended awaiting approval: the model turn already
    *  exists on the pending step; execute its (now-decided) tools and continue. */
   resumeApproval?: boolean;
+  /** Why this run started — carried on run.started so consumers can tell a
+   *  proactive (trigger) run from a reply. Defaults to interactive. */
+  source?: RunSource;
 }
 
 type ToolUse = Extract<ContentBlock, { type: "tool_use" }>;
@@ -57,7 +61,11 @@ export async function runAgentLoop(
   const emit = (body: ReefEventBody): void =>
     deps.emit({ ...body, sessionKey: run.sessionKey, runId: run.id } as ReefEventInit);
 
-  emit(options.resumeApproval ? { type: "run.resumed" } : { type: "run.started", agentId: agent.id });
+  emit(
+    options.resumeApproval
+      ? { type: "run.resumed" }
+      : { type: "run.started", agentId: agent.id, source: options.source },
+  );
 
   const modelTools = tools.modelTools(agent.toolAllowlist);
   let index = spine.getSteps(run.id).filter((s) => s.state === "committed").length;

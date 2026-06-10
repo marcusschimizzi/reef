@@ -129,6 +129,53 @@ export interface Compaction {
   createdAt: string;
 }
 
+/**
+ * Why a run started (reef-docs/05). Interactive runs come from a user message;
+ * Phase 4 adds proactive runs whose wake is a trigger. Carried on `run.started`
+ * so consumers can tell agent-initiated work from a reply.
+ */
+export type RunSource =
+  | { kind: "message" }
+  | { kind: "trigger"; triggerId: string; triggerType: TriggerType };
+
+/** A wake source beyond the inbound message (Phase 4). v1 ships `schedule`. */
+export type TriggerType = "schedule";
+
+/** When a trigger fires (Phase 4a). v1 ships cron and fixed interval. */
+export type TriggerSpec =
+  | { kind: "cron"; expr: string; tz?: string }
+  | { kind: "interval"; seconds: number };
+
+/**
+ * What to do with fires that were due while the daemon was down. `fire_once`
+ * (the default) runs the single now-overdue occurrence on restart and advances;
+ * `skip` drops missed fires silently. Bounded replay is a later opt-in.
+ */
+export type CatchUpPolicy = "fire_once" | "skip";
+
+/**
+ * A durable trigger record (Phase 4a) — like an agent or an approval, it
+ * survives restart; the scheduler recomputes `nextFireAt` from it. A trigger
+ * binds to one agent and one stable session, so a recurring routine is one
+ * ongoing thread rather than a scatter of orphan runs.
+ */
+export interface Trigger {
+  id: string;
+  agentId: string;
+  type: TriggerType;
+  spec: TriggerSpec;
+  /** Rendered into the synthetic wake message that starts the run. */
+  input: string;
+  /** Stable session for this trigger's runs (continuity across firings). */
+  sessionKey: string;
+  enabled: boolean;
+  catchUpPolicy: CatchUpPolicy;
+  /** ISO-8601 of the next due fire; absent once the schedule is exhausted. */
+  nextFireAt?: string;
+  lastFiredAt?: string;
+  createdAt: string;
+}
+
 export type StepState = "pending" | "committed";
 
 /**

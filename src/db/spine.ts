@@ -5,6 +5,7 @@ import type {
   AgentRecord,
   Approval,
   ApprovalStatus,
+  CatchUpPolicy,
   Compaction,
   ContentBlock,
   Message,
@@ -14,6 +15,9 @@ import type {
   Step,
   StepState,
   StopReason,
+  Trigger,
+  TriggerSpec,
+  TriggerType,
   Usage,
 } from "../core/types.js";
 import type { ReefEvent } from "../protocol/events.js";
@@ -47,6 +51,19 @@ interface CompactionRow {
   session_key: string;
   through_seq: number;
   summary: string;
+  created_at: string;
+}
+interface TriggerRow {
+  id: string;
+  agent_id: string;
+  type: string;
+  spec: string;
+  input: string;
+  session_key: string;
+  enabled: number;
+  catch_up_policy: string;
+  next_fire_at: string | null;
+  last_fired_at: string | null;
   created_at: string;
 }
 interface RunRow {
@@ -439,6 +456,73 @@ export class Spine {
     return c;
   }
 
+  // ── triggers (durable wake sources — Phase 4a) ──────────────────────────────
+  createTrigger(t: Trigger): void {
+    this.db
+      .prepare(
+        `INSERT INTO triggers
+           (id, agent_id, type, spec, input, session_key, enabled,
+            catch_up_policy, next_fire_at, last_fired_at, created_at)
+         VALUES (@id, @agent_id, @type, @spec, @input, @session_key, @enabled,
+            @catch_up_policy, @next_fire_at, @last_fired_at, @created_at)`,
+      )
+      .run({
+        id: t.id,
+        agent_id: t.agentId,
+        type: t.type,
+        spec: json(t.spec),
+        input: t.input,
+        session_key: t.sessionKey,
+        enabled: t.enabled ? 1 : 0,
+        catch_up_policy: t.catchUpPolicy,
+        next_fire_at: t.nextFireAt ?? null,
+        last_fired_at: t.lastFiredAt ?? null,
+        created_at: t.createdAt,
+      });
+  }
+
+  getTrigger(id: string): Trigger | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM triggers WHERE id = ?`)
+      .get(id) as TriggerRow | undefined;
+    return row ? rowToTrigger(row) : undefined;
+  }
+
+  listTriggers(agentId?: string): Trigger[] {
+    const rows = (
+      agentId
+        ? this.db.prepare(`SELECT * FROM triggers WHERE agent_id = ? ORDER BY created_at ASC`).all(agentId)
+        : this.db.prepare(`SELECT * FROM triggers ORDER BY created_at ASC`).all()
+    ) as TriggerRow[];
+    return rows.map(rowToTrigger);
+  }
+
+  /** Enabled triggers whose next fire is due at or before `nowIso`. */
+  getDueTriggers(nowIso: string): Trigger[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM triggers
+         WHERE enabled = 1 AND next_fire_at IS NOT NULL AND next_fire_at <= ?
+         ORDER BY next_fire_at ASC`,
+      )
+      .all(nowIso) as TriggerRow[];
+    return rows.map(rowToTrigger);
+  }
+
+  /** Advance a trigger after a tick: its new next fire and last-fired stamp. */
+  updateTriggerSchedule(
+    id: string,
+    next: { nextFireAt?: string; lastFiredAt?: string },
+  ): void {
+    this.db
+      .prepare(`UPDATE triggers SET next_fire_at = ?, last_fired_at = ? WHERE id = ?`)
+      .run(next.nextFireAt ?? null, next.lastFiredAt ?? null, id);
+  }
+
+  setTriggerEnabled(id: string, enabled: boolean): void {
+    this.db.prepare(`UPDATE triggers SET enabled = ? WHERE id = ?`).run(enabled ? 1 : 0, id);
+  }
+
   // ── events (native protocol log; consumer reconnect — Phase 2) ──────────────
   appendEvent(event: ReefEvent): void {
     this.db
@@ -498,6 +582,22 @@ function rowToApproval(row: ApprovalRow): Approval {
     decision: row.decision ?? undefined,
     createdAt: row.created_at,
     decidedAt: row.decided_at ?? undefined,
+  };
+}
+
+function rowToTrigger(row: TriggerRow): Trigger {
+  return {
+    id: row.id,
+    agentId: row.agent_id,
+    type: row.type as TriggerType,
+    spec: JSON.parse(row.spec) as TriggerSpec,
+    input: row.input,
+    sessionKey: row.session_key,
+    enabled: row.enabled === 1,
+    catchUpPolicy: row.catch_up_policy as CatchUpPolicy,
+    nextFireAt: row.next_fire_at ?? undefined,
+    lastFiredAt: row.last_fired_at ?? undefined,
+    createdAt: row.created_at,
   };
 }
 

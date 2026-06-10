@@ -10,7 +10,7 @@
 // so an adapter exhaustively handles the kinds it understands and forwards or
 // drops the rest deliberately.
 
-import type { ContentBlock, StopReason, Usage } from "../core/types.js";
+import type { ContentBlock, RunSource, StopReason, Usage } from "../core/types.js";
 
 /** Mirrors conch's approval decisions so the projection is lossless. */
 export type ApprovalDecision = "allow-once" | "allow-always" | "deny";
@@ -34,7 +34,7 @@ export interface EventEnvelope {
 export type ReefEvent = EventEnvelope &
   (
     // ── run & step lifecycle ───────────────────────────────────────────────
-    | { type: "run.started"; agentId: string }
+    | { type: "run.started"; agentId: string; source?: RunSource }
     | { type: "step.started"; index: number }
     | { type: "step.committed"; index: number; usage?: Usage }
     | { type: "run.suspended"; stopReason: StopReason; detail?: unknown }

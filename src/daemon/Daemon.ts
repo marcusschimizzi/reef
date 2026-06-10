@@ -1,11 +1,22 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { newRunId } from "../core/ids.js";
+import { newRunId, newTriggerId } from "../core/ids.js";
 import { nowIso } from "../core/time.js";
-import type { AgentRecord, ApprovalStatus, Run } from "../core/types.js";
+import type {
+  AgentRecord,
+  ApprovalStatus,
+  CatchUpPolicy,
+  Run,
+  RunSource,
+  Trigger,
+  TriggerSpec,
+  TriggerType,
+} from "../core/types.js";
 import { Spine } from "../db/spine.js";
 import { BoundFs } from "../fs/capability.js";
 import { runAgentLoop, type LoopOptions } from "../loop/AgentLoop.js";
+import { assertValidSpec, nextFireTime } from "../triggers/schedule.js";
+import { Scheduler, DEFAULT_TICK_MS } from "./Scheduler.js";
 import { VercelRouter, type ModelRouter } from "../model/router.js";
 import type { MemoryStore } from "../memory/seam.js";
 import { SqliteMemory } from "../memory/sqlite.js";
@@ -29,6 +40,8 @@ export interface DaemonOptions {
   maxSteps?: number;
   /** Memory backend factory; defaults to the SQLite/FTS5 store on the spine db. */
   memory?: MemoryFactory;
+  /** Scheduler tick cadence in ms (how often due triggers are reconciled). */
+  tickMs?: number;
 }
 
 interface Wake {
@@ -37,11 +50,18 @@ interface Wake {
   message: string;
 }
 
+// A due fire older than this was almost certainly missed during downtime (the
+// scheduler would otherwise catch it within a tick). The `skip` catch-up policy
+// drops such fires; `fire_once` runs them anyway.
+const MISSED_GRACE_MS = 90_000;
+
 // Everything the agent might wake for funnels into one serial inbox: a user
-// message, or a resume after an approval resolved (reef-docs/05 — one queue).
+// message, a resume after an approval resolved, or a trigger firing (reef-docs/05
+// — one queue, the "dispatch as shape" seam Phase 4 cashes in).
 type Job =
   | { kind: "message"; wake: Wake }
-  | { kind: "resume"; runId: string };
+  | { kind: "resume"; runId: string }
+  | { kind: "trigger"; triggerId: string };
 
 /**
  * The always-on agent runtime. Owns the spine (state), the router (model), the
@@ -60,6 +80,7 @@ export class Daemon {
   private readonly memoryFactory: MemoryFactory;
   /** One memory store per agent, built lazily and reused across that agent's runs. */
   private readonly memories = new Map<string, MemoryStore>();
+  private readonly scheduler: Scheduler;
   /** Abort handles for in-flight runs, keyed by session — powers cancellation. */
   private readonly aborters = new Map<string, AbortController>();
 
@@ -69,6 +90,7 @@ export class Daemon {
     this.router = opts.router ?? new VercelRouter();
     this.workspaceDir = opts.workspaceDir;
     this.maxSteps = opts.maxSteps ?? 20;
+    this.scheduler = new Scheduler(() => this.tickTriggers(), opts.tickMs ?? DEFAULT_TICK_MS);
     // Default memory: the SQLite/FTS5 store sharing the spine's connection,
     // scoped per agent so agents never see each other's memory.
     this.memoryFactory =
@@ -146,12 +168,89 @@ export class Daemon {
     return true;
   }
 
+  /** Begin firing triggers on the scheduler's cadence. Call after recover(). */
+  start(): void {
+    this.scheduler.start();
+  }
+
   close(): void {
+    this.scheduler.stop();
     this.spine.close();
+  }
+
+  // ── triggers (Phase 4a) ─────────────────────────────────────────────────────
+  /** Create a durable trigger and schedule its first fire. */
+  createTrigger(input: {
+    agentId: string;
+    type?: TriggerType;
+    spec: TriggerSpec;
+    input: string;
+    catchUpPolicy?: CatchUpPolicy;
+    enabled?: boolean;
+  }): Trigger {
+    assertValidSpec(input.spec);
+    const id = newTriggerId();
+    const enabled = input.enabled ?? true;
+    const trigger: Trigger = {
+      id,
+      agentId: input.agentId,
+      type: input.type ?? "schedule",
+      spec: input.spec,
+      input: input.input,
+      // Stable per-trigger session: a recurring routine is one ongoing thread.
+      sessionKey: `reef:${input.agentId}:trigger-${id}`,
+      enabled,
+      catchUpPolicy: input.catchUpPolicy ?? "fire_once",
+      nextFireAt: enabled ? nextFireTime(input.spec, new Date())?.toISOString() : undefined,
+      createdAt: nowIso(),
+    };
+    this.spine.createTrigger(trigger);
+    return trigger;
+  }
+
+  listTriggers(agentId?: string): Trigger[] {
+    return this.spine.listTriggers(agentId);
+  }
+
+  setTriggerEnabled(id: string, enabled: boolean): boolean {
+    const t = this.spine.getTrigger(id);
+    if (!t) return false;
+    // Re-enabling computes a fresh next fire; disabling clears it.
+    this.spine.setTriggerEnabled(id, enabled);
+    this.spine.updateTriggerSchedule(id, {
+      nextFireAt: enabled ? nextFireTime(t.spec, new Date())?.toISOString() : undefined,
+      lastFiredAt: t.lastFiredAt,
+    });
+    return true;
+  }
+
+  /**
+   * Reconcile due triggers (driven by the Scheduler, or directly in tests). For
+   * each due trigger: advance its next fire first (so a slow run can't double-
+   * fire it), then either enqueue a wake or, under `skip`, drop a fire that was
+   * missed while the daemon was down. `fire_once` (default) always runs the
+   * single overdue occurrence.
+   */
+  async tickTriggers(now: Date = new Date()): Promise<void> {
+    const nowMs = now.getTime();
+    for (const t of this.spine.getDueTriggers(now.toISOString())) {
+      const next = nextFireTime(t.spec, now);
+      this.spine.updateTriggerSchedule(t.id, {
+        nextFireAt: next?.toISOString(),
+        lastFiredAt: now.toISOString(),
+      });
+
+      const dueMs = t.nextFireAt ? Date.parse(t.nextFireAt) : nowMs;
+      const missed = nowMs - dueMs > MISSED_GRACE_MS;
+      if (missed && t.catchUpPolicy === "skip") continue; // drop the missed fire
+
+      await this.inbox.enqueue({ kind: "trigger", triggerId: t.id });
+    }
   }
 
   private async processJob(job: Job): Promise<void> {
     if (job.kind === "message") return this.processWake(job.wake);
+    if (job.kind === "trigger") return this.processTrigger(job.triggerId);
     return this.resumeRun(job.runId);
   }
 
@@ -166,6 +265,25 @@ export class Daemon {
       sessionKey: wake.sessionKey,
     });
     await this.runLoop(run);
+  }
+
+  /** A trigger fired: seed its configured instruction as the wake and run, on
+   *  the trigger's stable session, tagged as a proactive run. */
+  private async processTrigger(triggerId: string): Promise<void> {
+    const trigger = this.spine.getTrigger(triggerId);
+    if (!trigger || !trigger.enabled) return;
+    this.spine.ensureSession(trigger.sessionKey, trigger.agentId);
+    this.spine.appendMessage(trigger.sessionKey, "user", [
+      { type: "text", text: trigger.input },
+    ]);
+    const run = this.spine.createRun({
+      id: newRunId(),
+      agentId: trigger.agentId,
+      sessionKey: trigger.sessionKey,
+    });
+    await this.runLoop(run, {
+      source: { kind: "trigger", triggerId: trigger.id, triggerType: trigger.type },
+    });
   }
 
   private async resumeRun(runId: string): Promise<void> {
