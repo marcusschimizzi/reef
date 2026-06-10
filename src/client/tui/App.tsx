@@ -6,9 +6,9 @@ import {
   Banner,
   CommandPalette,
   ItemView,
+  Mascot,
   StatusBar,
   Transcript,
-  WorkingOctopus,
   type Command,
   type SessionInfo,
 } from "./components.js";
@@ -179,11 +179,9 @@ export function App({ socketPath, session }: AppProps) {
             <TextInput value={input} onChange={setInput} onSubmit={submit} placeholder="ask reef…" />
           </Box>
         )}
-        {state.status === "working" ? (
-          <Box marginTop={1}>
-            <WorkingOctopus theme={theme} />
-          </Box>
-        ) : null}
+        <Box marginTop={1}>
+          <Mascot theme={theme} active={state.status === "working"} />
+        </Box>
         <StatusBar theme={theme} status={state.status} usage={state.usage} agentId={session.agentId} />
       </Box>
     </Box>

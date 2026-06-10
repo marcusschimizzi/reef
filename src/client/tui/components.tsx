@@ -39,23 +39,26 @@ export function AvatarArt({ theme, avatar }: { theme: Theme; avatar: Avatar }) {
   return <PixelSprite rows={avatar.rows} body={theme.primary} />;
 }
 
-// A compact octopus that wiggles its tentacles and blinks — shown while a run is
-// in flight. It lives in the live region (not <Static>), so it can re-render on
-// a timer. Frames vary the tentacle rows; the blink frame drops the eyes.
-const WORK_FRAMES: string[][] = [
-  ["...oooooo...", "..oooooooo..", ".oeeooooeeo.", ".oooooooooo.", "..o..oo..o..", ".o...oo...o."],
-  ["...oooooo...", "..oooooooo..", ".oeeooooeeo.", ".oooooooooo.", "...o.oo.o...", "..o..oo..o.."],
-  ["...oooooo...", "..oooooooo..", ".oeeooooeeo.", ".oooooooooo.", "..o..oo..o..", ".o...oo...o."],
-  ["...oooooo...", "..oooooooo..", ".oooooooooo.", ".oooooooooo.", "..o..oo..o..", ".o...oo...o."],
-];
+// The persistent live-region mascot. The banner octopus is frozen in <Static>,
+// so this small one carries the "alive" feeling: calm with the occasional blink
+// when idle, an energetic tentacle wiggle while a run is in flight. Frames are
+// half-block grids; the BLINK frame drops the eyes (e → body).
+const BASE = ["...oooooo...", "..oooooooo..", ".oeeooooeeo.", ".oooooooooo.", "..o..oo..o..", ".o...oo...o."];
+const BLINK = ["...oooooo...", "..oooooooo..", ".oooooooooo.", ".oooooooooo.", "..o..oo..o..", ".o...oo...o."];
+const WIGGLE = ["...oooooo...", "..oooooooo..", ".oeeooooeeo.", ".oooooooooo.", "...o.oo.o...", "..o..oo..o.."];
 
-export function WorkingOctopus({ theme }: { theme: Theme }) {
-  const [frame, setFrame] = useState(0);
+// Idle: mostly still, a slow blink. Working: alternate wiggle + blink, quickly.
+const IDLE_FRAMES: string[][] = [BASE, BASE, BASE, BASE, BASE, BLINK];
+const WORK_FRAMES: string[][] = [BASE, WIGGLE, BASE, BLINK];
+
+export function Mascot({ theme, active }: { theme: Theme; active: boolean }) {
+  const [tick, setTick] = useState(0);
   useEffect(() => {
-    const t = setInterval(() => setFrame((f) => (f + 1) % WORK_FRAMES.length), 320);
+    const t = setInterval(() => setTick((x) => x + 1), active ? 320 : 900);
     return () => clearInterval(t);
-  }, []);
-  return <PixelSprite rows={WORK_FRAMES[frame]!} body={theme.primary} />;
+  }, [active]);
+  const frames = active ? WORK_FRAMES : IDLE_FRAMES;
+  return <PixelSprite rows={frames[tick % frames.length]!} body={theme.primary} />;
 }
 
 // Presentational Ink components. Color is an accent only (see theme.ts): body
