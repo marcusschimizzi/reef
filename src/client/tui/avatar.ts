@@ -29,40 +29,53 @@ const MANTLE = [
 ];
 
 export const AVATARS: Record<string, Avatar> = {
-  // Default — arms splay outward with a modest curl at the outer tips.
+  // Default — arms splay outward with a curl at the tips, center left OPEN (no
+  // straight-down central arm, which read as a "nose").
   pixel: {
     rows: [
       ...MANTLE,
-      "..oo.oo.oo.oo.oo..",
-      ".oo..oo.oo.oo..oo.",
-      "oo...o..oo..o...oo",
-      "o....oo.oo.oo....o",
+      "..oo.oo....oo.oo..",
+      ".oo..oo....oo..oo.",
+      "oo...o......o...oo",
+      "o....oo....oo....o",
       "oo....o....o....oo",
-      ".......oo.oo......",
     ],
   },
   // Arms sweep wide to the edges, then hook back inward — a dramatic curl.
   "pixel-curl": {
     rows: [
       ...MANTLE,
-      "..oo.oo.oo.oo.oo..",
-      ".oo..oo.oo.oo..oo.",
-      "oo...oo.oo.oo...oo",
-      "oo..o...oo...o..oo",
-      ".oo.....oo.....oo.",
-      "..o.....oo.....o..",
+      "..oo.oo....oo.oo..",
+      ".oo..oo....oo..oo.",
+      "oo...oo....oo...oo",
+      "oo..o........o..oo",
+      ".oo............oo.",
+      "..o............o..",
     ],
   },
-  // Arms hang close and straight — a calm, resting stance.
+  // Arms hang on the sides in two soft clusters — a calm, resting stance.
   "pixel-hang": {
     rows: [
       ...MANTLE,
-      "...oo.oo.oo.oo....",
-      "...o.oo.oo.oo.o...",
-      "...o.o..oo..o.o...",
-      "...o.o..oo..o.o...",
-      "....o..o..o..o....",
-      ".......oo.oo......",
+      "..oo.oo....oo.oo..",
+      "..o.o........o.o..",
+      "..o.o........o.o..",
+      "..oo.o......o.oo..",
+      "...o..........o...",
+    ],
+  },
+  // Asymmetric — one arm raised to the upper-left and curling (a friendly wave),
+  // the rest splaying down-right. Center open.
+  "pixel-wave": {
+    rows: [
+      ...MANTLE.slice(0, 10),
+      "oo.oooooooooooo...",
+      ".oo.oooooooooo....",
+      "..oo.oooooooo.....",
+      "...oo.oo..oo.oo...",
+      "..o...oo..oo...o..",
+      ".....o......o.....",
+      ".....oo....oo.....",
     ],
   },
 };
