@@ -129,9 +129,13 @@ describe("transcript reducer", () => {
     expect(live[0]).toMatchObject({ kind: "assistant", streaming: true });
     expect(done.every((i) => !(i.kind === "assistant" && i.streaming))).toBe(true);
 
-    // a fully settled transcript has no live tail
+    // even when fully settled, the bottom-most item stays live (never committed
+    // to <Static>, which can clip the last line of a tall message)
     const settled = reduceEvent(s, ev({ type: "run.completed", stopReason: "completed" }));
-    expect(splitTranscript(settled.items).live).toHaveLength(0);
+    const split = splitTranscript(settled.items);
+    expect(split.live).toHaveLength(1);
+    expect(split.live[0]).toBe(settled.items.at(-1));
+    expect(split.done).toEqual(settled.items.slice(0, -1));
 
     // a running tool is live
     const tool = run(ev({ type: "tool.requested", toolUseId: "t9", name: "x", input: {}, needsApproval: false }));

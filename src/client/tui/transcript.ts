@@ -263,8 +263,13 @@ export function splitTranscript(items: TranscriptItem[]): {
   done: TranscriptItem[];
   live: TranscriptItem[];
 } {
-  const i = items.findIndex(isLive);
-  return i === -1 ? { done: items, live: [] } : { done: items.slice(0, i), live: items.slice(i) };
+  if (items.length === 0) return { done: [], live: [] };
+  const firstLive = items.findIndex(isLive);
+  // Keep at least the final item in the live (re-rendered) region. Ink's <Static>
+  // can clip the last line of a tall committed item at the Static→live boundary,
+  // so the bottom-most turn must never be committed until a newer item is below it.
+  const cut = firstLive === -1 ? items.length - 1 : firstLive;
+  return { done: items.slice(0, cut), live: items.slice(cut) };
 }
 
 /** Approvals still awaiting a decision — drives the TUI's input focus. */
