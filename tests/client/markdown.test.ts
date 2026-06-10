@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseSegments } from "../../src/client/tui/markdown.js";
+import { parseInline, parseSegments } from "../../src/client/tui/markdown.js";
 
 describe("parseSegments", () => {
   it("returns a single text segment when there is no code", () => {
@@ -36,5 +36,33 @@ describe("parseSegments", () => {
   it("preserves blank lines inside a code block", () => {
     const segs = parseSegments("```\na\n\nb\n```");
     expect(segs[0]).toMatchObject({ kind: "code", code: "a\n\nb" });
+  });
+});
+
+describe("parseInline", () => {
+  it("returns one plain span when there is no markup", () => {
+    expect(parseInline("just text")).toEqual([{ text: "just text" }]);
+  });
+
+  it("parses **bold** and __bold__", () => {
+    expect(parseInline("**Files & workspace**")).toEqual([{ text: "Files & workspace", bold: true }]);
+    expect(parseInline("a __b__ c")).toEqual([{ text: "a " }, { text: "b", bold: true }, { text: " c" }]);
+  });
+
+  it("parses *italic* and inline `code`", () => {
+    expect(parseInline("*hi*")).toEqual([{ text: "hi", italic: true }]);
+    expect(parseInline("use `recall_memory`")).toEqual([
+      { text: "use " },
+      { text: "recall_memory", code: true },
+    ]);
+  });
+
+  it("treats underscore-italic at word boundaries but leaves snake_case alone", () => {
+    expect(parseInline("_emph_")).toEqual([{ text: "emph", italic: true }]);
+    expect(parseInline("call my_var_name now")).toEqual([{ text: "call my_var_name now" }]);
+  });
+
+  it("leaves an unterminated marker as literal text", () => {
+    expect(parseInline("**Files")).toEqual([{ text: "**Files" }]);
   });
 });

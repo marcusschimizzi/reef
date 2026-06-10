@@ -3,7 +3,7 @@ import { Box, Text } from "ink";
 import Spinner from "ink-spinner";
 import { resolveAvatar, WORDMARK, TAGLINE, type Avatar } from "./avatar.js";
 import { shade, type Theme } from "./theme.js";
-import { parseSegments } from "./markdown.js";
+import { parseInline, parseSegments } from "./markdown.js";
 import { tokenizeLine, usesHashComments, type TokenClass } from "./highlight.js";
 import type { RunStatus, TranscriptItem, UsageTotals } from "./transcript.js";
 
@@ -216,8 +216,72 @@ function CodeBlock({ theme, lang, code }: { theme: Theme; lang?: string; code: s
   );
 }
 
-/** An assistant turn. Plain replies render inline; replies containing fenced
- *  code render the prose + boxed code blocks stacked, with the label on top. */
+/** Inline prose with markdown emphasis: **bold**, *italic*, `code`. */
+function Inline({ theme, text }: { theme: Theme; text: string }) {
+  return (
+    <>
+      {parseInline(text).map((s, i) => (
+        <Text key={i} bold={s.bold} italic={s.italic} color={s.code ? theme.secondary : undefined}>
+          {s.text}
+        </Text>
+      ))}
+    </>
+  );
+}
+
+/** One prose line: a heading, a bullet/numbered list item, or a paragraph. */
+function ProseLine({ theme, line }: { theme: Theme; line: string }) {
+  if (line.trim() === "") return <Text> </Text>;
+
+  const heading = line.match(/^(#{1,6})\s+(.*)$/);
+  if (heading) {
+    return (
+      <Text bold color={theme.primary}>
+        <Inline theme={theme} text={heading[2]!} />
+      </Text>
+    );
+  }
+  const bullet = line.match(/^(\s*)[-*+]\s+(.*)$/);
+  if (bullet) {
+    return (
+      <Text>
+        {bullet[1]}
+        <Text color={theme.muted}>• </Text>
+        <Inline theme={theme} text={bullet[2]!} />
+      </Text>
+    );
+  }
+  const numbered = line.match(/^(\s*)(\d+)\.\s+(.*)$/);
+  if (numbered) {
+    return (
+      <Text>
+        {numbered[1]}
+        <Text color={theme.muted}>{numbered[2]}. </Text>
+        <Inline theme={theme} text={numbered[3]!} />
+      </Text>
+    );
+  }
+  return (
+    <Text>
+      <Inline theme={theme} text={line} />
+    </Text>
+  );
+}
+
+/** A prose block: each line rendered with markdown (headings, lists, emphasis). */
+function Prose({ theme, text }: { theme: Theme; text: string }) {
+  return (
+    <Box flexDirection="column">
+      {text.split("\n").map((line, i) => (
+        <ProseLine key={i} theme={theme} line={line} />
+      ))}
+    </Box>
+  );
+}
+
+/** An assistant turn. A short single-line reply renders inline next to the
+ *  label; anything with lists / headings / multiple lines / code renders as a
+ *  stacked block with markdown prose and boxed code. */
 function AssistantView({
   theme,
   item,
@@ -227,14 +291,16 @@ function AssistantView({
 }) {
   const segments = parseSegments(item.text);
   const cursor = item.streaming ? <Text color={theme.muted}>▌</Text> : null;
+  const first = segments[0];
+  const simple = segments.length === 1 && first?.kind === "text" && !first.text.includes("\n");
 
-  if (!segments.some((s) => s.kind === "code")) {
+  if (simple && first?.kind === "text") {
     return (
       <Text>
         <Text color={theme.primary} bold>
           reef{" "}
         </Text>
-        {item.text}
+        <Inline theme={theme} text={first.text} />
         {cursor}
       </Text>
     );
@@ -247,7 +313,7 @@ function AssistantView({
       </Text>
       {segments.map((s, i) =>
         s.kind === "text" ? (
-          <Text key={i}>{s.text}</Text>
+          <Prose key={i} theme={theme} text={s.text} />
         ) : (
           <CodeBlock key={i} theme={theme} lang={s.lang} code={s.code} />
         ),
