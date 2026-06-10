@@ -7,6 +7,7 @@ import {
   CommandPalette,
   ItemView,
   StatusBar,
+  startsTurn,
   Transcript,
   type Command,
   type SessionInfo,
@@ -157,7 +158,9 @@ export function App({ socketPath, session }: AppProps) {
       <Static key={generation} items={staticEntries}>
         {(entry) =>
           entry.item ? (
-            <ItemView key={entry.key} theme={theme} item={entry.item} />
+            <Box key={entry.key} marginTop={startsTurn(entry.item) ? 1 : 0}>
+              <ItemView theme={theme} item={entry.item} />
+            </Box>
           ) : (
             <Banner key={entry.key} theme={theme} session={session} />
           )

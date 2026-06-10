@@ -41,6 +41,28 @@ describe("transcript reducer", () => {
     expect(lastOf(done, "assistant").streaming).toBe(false);
   });
 
+  it("replaces streamed text with the authoritative content on completion", () => {
+    // deltas dropped the tail ("…spec"); message.completed carries the full text
+    const s = run(
+      ev({ type: "message.delta", text: "…sketch the interface spec" }),
+      ev({
+        type: "message.completed",
+        content: [{ type: "text", text: "…sketch the interface spec for any of these (e.g. …)?" }],
+      }),
+    );
+    const a = lastOf(s, "assistant");
+    expect(a.text).toBe("…sketch the interface spec for any of these (e.g. …)?");
+    expect(a.streaming).toBe(false);
+  });
+
+  it("creates an assistant item when text arrives only on completion", () => {
+    const s = reduceEvent(
+      initialState,
+      ev({ type: "message.completed", content: [{ type: "text", text: "hello" }] }),
+    );
+    expect(lastOf(s, "assistant")).toMatchObject({ text: "hello", streaming: false });
+  });
+
   it("tracks a tool through requested → running → completed", () => {
     const s = run(
       ev({ type: "tool.requested", toolUseId: "t1", name: "echo", input: { m: "hi" }, needsApproval: false }),

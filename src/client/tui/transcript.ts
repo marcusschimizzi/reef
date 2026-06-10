@@ -1,4 +1,13 @@
 import type { ReefEvent } from "../../protocol/events.js";
+import type { ContentBlock } from "../../core/types.js";
+
+/** Concatenate the text blocks of a completed turn — the authoritative message. */
+function textOf(content: ContentBlock[]): string {
+  return content
+    .filter((b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text")
+    .map((b) => b.text)
+    .join("");
+}
 
 // The transcript model — a pure reduction of reef's native event stream into a
 // flat list of renderable items, plus run status and cumulative usage. Keeping
@@ -129,13 +138,24 @@ export function reduceEvent(state: TranscriptState, event: ReefEvent): Transcrip
       return push(state, { kind: "assistant", text: event.text, streaming: true });
     }
 
-    case "message.completed":
-      // Finalize any in-flight assistant stream for this turn.
-      return patch(
-        state,
-        (i) => i.kind === "assistant" && i.streaming,
-        (i) => ({ ...(i as Extract<TranscriptItem, { kind: "assistant" }>), streaming: false }),
-      );
+    case "message.completed": {
+      // Finalize the in-flight assistant stream, replacing its text with the
+      // turn's authoritative full content (deltas can drop the tail — that was
+      // the "response cut off before the end" bug).
+      const full = textOf(event.content);
+      if (state.items.some((i) => i.kind === "assistant" && i.streaming)) {
+        return patch(
+          state,
+          (i) => i.kind === "assistant" && i.streaming,
+          (i) => {
+            const a = i as Extract<TranscriptItem, { kind: "assistant" }>;
+            return { ...a, text: full || a.text, streaming: false };
+          },
+        );
+      }
+      // Text arrived only on completion (no deltas streamed) — add it.
+      return full ? push(state, { kind: "assistant", text: full, streaming: false }) : state;
+    }
 
     case "tool.requested":
       return push(state, {

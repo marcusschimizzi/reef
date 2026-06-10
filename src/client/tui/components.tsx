@@ -363,6 +363,12 @@ export function ItemView({
   }
 }
 
+/** A blank line before each user/assistant turn separates exchanges; tool,
+ *  notice, approval, and error lines stay tight under the turn they belong to. */
+export function startsTurn(item: TranscriptItem): boolean {
+  return item.kind === "user" || item.kind === "assistant";
+}
+
 export function Transcript({
   theme,
   items,
@@ -375,7 +381,9 @@ export function Transcript({
   return (
     <Box flexDirection="column">
       {items.map((item) => (
-        <ItemView key={item.id} theme={theme} item={item} activeApprovalId={activeApprovalId} />
+        <Box key={item.id} marginTop={startsTurn(item) ? 1 : 0}>
+          <ItemView theme={theme} item={item} activeApprovalId={activeApprovalId} />
+        </Box>
       ))}
     </Box>
   );
