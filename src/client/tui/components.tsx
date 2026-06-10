@@ -1,9 +1,10 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Box, Text } from "ink";
 import Spinner from "ink-spinner";
 import { resolveAvatar, WORDMARK, TAGLINE, type Avatar } from "./avatar.js";
 import { shade, type Theme } from "./theme.js";
 import { parseSegments } from "./markdown.js";
+import { tokenizeLine, usesHashComments, type TokenClass } from "./highlight.js";
 import type { RunStatus, TranscriptItem, UsageTotals } from "./transcript.js";
 
 const EYE = "#1b1f24"; // near-black eyes read as holes in the colored body
@@ -36,6 +37,25 @@ function PixelSprite({ rows, body }: { rows: string[]; body: string }) {
 
 export function AvatarArt({ theme, avatar }: { theme: Theme; avatar: Avatar }) {
   return <PixelSprite rows={avatar.rows} body={theme.primary} />;
+}
+
+// A compact octopus that wiggles its tentacles and blinks — shown while a run is
+// in flight. It lives in the live region (not <Static>), so it can re-render on
+// a timer. Frames vary the tentacle rows; the blink frame drops the eyes.
+const WORK_FRAMES: string[][] = [
+  ["...oooooo...", "..oooooooo..", ".oeeooooeeo.", ".oooooooooo.", "..o..oo..o..", ".o...oo...o."],
+  ["...oooooo...", "..oooooooo..", ".oeeooooeeo.", ".oooooooooo.", "...o.oo.o...", "..o..oo..o.."],
+  ["...oooooo...", "..oooooooo..", ".oeeooooeeo.", ".oooooooooo.", "..o..oo..o..", ".o...oo...o."],
+  ["...oooooo...", "..oooooooo..", ".oooooooooo.", ".oooooooooo.", "..o..oo..o..", ".o...oo...o."],
+];
+
+export function WorkingOctopus({ theme }: { theme: Theme }) {
+  const [frame, setFrame] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setFrame((f) => (f + 1) % WORK_FRAMES.length), 320);
+    return () => clearInterval(t);
+  }, []);
+  return <PixelSprite rows={WORK_FRAMES[frame]!} body={theme.primary} />;
 }
 
 // Presentational Ink components. Color is an accent only (see theme.ts): body
@@ -149,8 +169,25 @@ export function ApprovalCard({
   );
 }
 
-/** A fenced code block: bordered, with a muted language tag. */
+function tokenColor(theme: Theme, cls: TokenClass): string | undefined {
+  switch (cls) {
+    case "keyword":
+      return theme.primary;
+    case "string":
+      return theme.ok;
+    case "number":
+      return theme.warn;
+    case "comment":
+      return theme.muted;
+    case "plain":
+      return undefined; // terminal foreground
+  }
+}
+
+/** A fenced code block: bordered, with a muted language tag and tasteful,
+ *  dependency-free syntax highlighting (per-line tokenized into colored spans). */
 function CodeBlock({ theme, lang, code }: { theme: Theme; lang?: string; code: string }) {
+  const hash = usesHashComments(lang);
   return (
     <Box
       flexDirection="column"
@@ -161,7 +198,17 @@ function CodeBlock({ theme, lang, code }: { theme: Theme; lang?: string; code: s
       alignSelf="flex-start"
     >
       {lang ? <Text color={theme.muted}>{lang}</Text> : null}
-      <Text>{code}</Text>
+      {code.split("\n").map((line, i) => (
+        <Text key={i}>
+          {line === ""
+            ? " "
+            : tokenizeLine(line, { hash }).map((t, j) => (
+                <Text key={j} color={tokenColor(theme, t.cls)}>
+                  {t.text}
+                </Text>
+              ))}
+        </Text>
+      ))}
     </Box>
   );
 }
