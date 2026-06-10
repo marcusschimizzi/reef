@@ -11,7 +11,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "daemon": "tsx src/daemon/index.ts",
-    "cli": "tsx src/client/cli.ts",
+    "cli": "tsx src/client/cli.tsx",
+    "tui": "tsx src/client/cli.tsx",
     "test": "vitest run"
   },
   "dependencies": {
@@ -19,11 +20,17 @@
     "ai": "^6.0.198",
     "better-sqlite3": "^11.8.0",
     "croner": "^9.1.0",
+    "ink": "^7.0.5",
+    "ink-spinner": "^5.0.0",
+    "ink-text-input": "^6.0.0",
+    "react": "^19.2.7",
     "zod": "^4.0.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^22.0.0",
+    "@types/react": "^19.2.17",
+    "ink-testing-library": "^4.0.0",
     "tsx": "^4.0.0",
     "typescript": "^5.5.0",
     "vitest": "^1.6.0"

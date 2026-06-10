@@ -7,13 +7,11 @@ import type { Daemon } from "./Daemon.js";
 // the conch adapter later) connect, subscribe to the native event stream, and
 // send control requests. The same daemon interface backs every consumer.
 
-/** Client → daemon control messages (v1: just "send a message"). */
-export interface ControlRequest {
-  kind: "send";
-  sessionKey: string;
-  agentId?: string;
-  message: string;
-}
+/** Client → daemon control messages over the socket. */
+export type ControlRequest =
+  | { kind: "send"; sessionKey: string; agentId?: string; message: string }
+  | { kind: "resolve"; approvalId: string; decision: string }
+  | { kind: "stop"; sessionKey: string };
 
 export function startSocketServer(
   daemon: Daemon,
@@ -63,16 +61,24 @@ function handleLine(
     sock.write(`${JSON.stringify({ kind: "error", error: "invalid JSON" })}\n`);
     return;
   }
-  if (req.kind === "send") {
-    daemon
-      .submit({
-        sessionKey: req.sessionKey,
-        agentId: req.agentId ?? defaultAgentId,
-        message: req.message,
-      })
-      .catch((err: unknown) => {
-        const error = err instanceof Error ? err.message : String(err);
-        sock.write(`${JSON.stringify({ kind: "error", error })}\n`);
-      });
+  switch (req.kind) {
+    case "send":
+      daemon
+        .submit({
+          sessionKey: req.sessionKey,
+          agentId: req.agentId ?? defaultAgentId,
+          message: req.message,
+        })
+        .catch((err: unknown) => {
+          const error = err instanceof Error ? err.message : String(err);
+          sock.write(`${JSON.stringify({ kind: "error", error })}\n`);
+        });
+      break;
+    case "resolve":
+      daemon.resolveApproval(req.approvalId, req.decision);
+      break;
+    case "stop":
+      daemon.cancel(req.sessionKey);
+      break;
   }
 }
