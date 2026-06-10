@@ -15,7 +15,12 @@ const items: TranscriptItem[] = [
   { id: 3, kind: "tool", toolUseId: "t1", name: "shell", input: { command: "git push origin cleanup" }, status: "ok", output: "Everything up-to-date" },
   { id: 4, kind: "approval", approvalId: "a1", action: "shell · git push origin cleanup", status: "allowed" },
   { id: 5, kind: "notice", text: "compacted 6 earlier message(s) into a summary" },
-  { id: 6, kind: "assistant", text: "Done — pushed to origin/cleanup.", streaming: true },
+  {
+    id: 6,
+    kind: "assistant",
+    text: "Here's the helper:\n```ts\nexport const sum = (a: number, b: number) => a + b;\n```\nWant tests too?",
+    streaming: false,
+  },
 ];
 
 const { lastFrame } = render(

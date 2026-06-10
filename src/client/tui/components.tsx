@@ -3,6 +3,7 @@ import { Box, Text } from "ink";
 import Spinner from "ink-spinner";
 import { resolveAvatar, WORDMARK, TAGLINE, type Avatar } from "./avatar.js";
 import { shade, type Theme } from "./theme.js";
+import { parseSegments } from "./markdown.js";
 import type { RunStatus, TranscriptItem, UsageTotals } from "./transcript.js";
 
 const EYE = "#1b1f24"; // near-black eyes read as holes in the colored body
@@ -148,6 +149,64 @@ export function ApprovalCard({
   );
 }
 
+/** A fenced code block: bordered, with a muted language tag. */
+function CodeBlock({ theme, lang, code }: { theme: Theme; lang?: string; code: string }) {
+  return (
+    <Box
+      flexDirection="column"
+      borderStyle="round"
+      borderColor={theme.muted}
+      paddingX={1}
+      marginY={1}
+      alignSelf="flex-start"
+    >
+      {lang ? <Text color={theme.muted}>{lang}</Text> : null}
+      <Text>{code}</Text>
+    </Box>
+  );
+}
+
+/** An assistant turn. Plain replies render inline; replies containing fenced
+ *  code render the prose + boxed code blocks stacked, with the label on top. */
+function AssistantView({
+  theme,
+  item,
+}: {
+  theme: Theme;
+  item: Extract<TranscriptItem, { kind: "assistant" }>;
+}) {
+  const segments = parseSegments(item.text);
+  const cursor = item.streaming ? <Text color={theme.muted}>▌</Text> : null;
+
+  if (!segments.some((s) => s.kind === "code")) {
+    return (
+      <Text>
+        <Text color={theme.primary} bold>
+          reef{" "}
+        </Text>
+        {item.text}
+        {cursor}
+      </Text>
+    );
+  }
+
+  return (
+    <Box flexDirection="column">
+      <Text color={theme.primary} bold>
+        reef
+      </Text>
+      {segments.map((s, i) =>
+        s.kind === "text" ? (
+          <Text key={i}>{s.text}</Text>
+        ) : (
+          <CodeBlock key={i} theme={theme} lang={s.lang} code={s.code} />
+        ),
+      )}
+      {cursor}
+    </Box>
+  );
+}
+
 export function ItemView({
   theme,
   item,
@@ -166,15 +225,7 @@ export function ItemView({
         </Text>
       );
     case "assistant":
-      return (
-        <Text>
-          <Text color={theme.primary} bold>
-            reef{" "}
-          </Text>
-          {item.text}
-          {item.streaming ? <Text color={theme.muted}>▌</Text> : null}
-        </Text>
-      );
+      return <AssistantView theme={theme} item={item} />;
     case "thinking":
       return (
         <Text color={theme.muted} italic>
