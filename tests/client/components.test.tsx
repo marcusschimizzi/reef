@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { render } from "ink-testing-library";
-import { Banner, ApprovalCard, StatusBar } from "../../src/client/tui/components.js";
+import { Banner, ApprovalCard, CommandPalette, StatusBar } from "../../src/client/tui/components.js";
 import { resolveTheme } from "../../src/client/tui/theme.js";
 
 const theme = resolveTheme("coral");
@@ -39,6 +39,24 @@ describe("TUI components", () => {
       />,
     );
     expect(resolved.lastFrame() ?? "").toContain("approval denied");
+  });
+
+  it("lists slash-command suggestions and marks the selected one", () => {
+    const { lastFrame } = render(
+      <CommandPalette
+        theme={theme}
+        selected={1}
+        matches={[
+          { name: "help", description: "show available commands" },
+          { name: "stop", description: "cancel the current run" },
+        ]}
+      />,
+    );
+    const out = lastFrame() ?? "";
+    expect(out).toContain("/help");
+    expect(out).toContain("/stop");
+    expect(out).toContain("cancel the current run");
+    expect(out).toMatch(/❯ .*\/stop/); // the selected (index 1) row carries the marker
   });
 
   it("reflects run status in the status bar", () => {

@@ -215,6 +215,39 @@ export function Transcript({
   );
 }
 
+export interface Command {
+  name: string;
+  description: string;
+}
+
+/** Filtered slash-command suggestions, shown above the input as you type `/`. */
+export function CommandPalette({
+  theme,
+  matches,
+  selected,
+}: {
+  theme: Theme;
+  matches: Command[];
+  selected: number;
+}) {
+  return (
+    <Box flexDirection="column" marginBottom={1}>
+      {matches.map((c, i) => {
+        const on = i === selected;
+        return (
+          <Text key={c.name}>
+            <Text color={on ? theme.primary : theme.muted}>{on ? "❯ " : "  "}</Text>
+            <Text color={on ? theme.primary : undefined} bold={on}>
+              /{c.name}
+            </Text>
+            <Text color={theme.muted}>{"  "}{c.description}</Text>
+          </Text>
+        );
+      })}
+    </Box>
+  );
+}
+
 export function StatusBar({
   theme,
   status,

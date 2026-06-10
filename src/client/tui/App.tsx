@@ -2,7 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
 import TextInput from "ink-text-input";
 import { PROMPT } from "./avatar.js";
-import { Banner, StatusBar, Transcript, type SessionInfo } from "./components.js";
+import {
+  Banner,
+  CommandPalette,
+  StatusBar,
+  Transcript,
+  type Command,
+  type SessionInfo,
+} from "./components.js";
 import { Connection, type ConnStatus } from "./connection.js";
 import { resolveTheme } from "./theme.js";
 import {
@@ -14,13 +21,17 @@ import {
   type TranscriptState,
 } from "./transcript.js";
 
+const COMMANDS: Command[] = [
+  { name: "help", description: "show available commands" },
+  { name: "stop", description: "cancel the current run" },
+  { name: "clear", description: "clear the transcript" },
+  { name: "new", description: "start a fresh session" },
+  { name: "quit", description: "exit reef" },
+];
+
 const HELP = [
   "commands:",
-  "  /help          show this",
-  "  /stop          cancel the current run",
-  "  /clear         clear the transcript",
-  "  /new           start a fresh session",
-  "  /quit          exit",
+  ...COMMANDS.map((c) => `  /${c.name.padEnd(7)} ${c.description}`),
 ].join("\n");
 
 export interface AppProps {
@@ -33,6 +44,7 @@ export function App({ socketPath, session }: AppProps) {
   const theme = resolveTheme();
   const [state, setState] = useState<TranscriptState>(initialState);
   const [input, setInput] = useState("");
+  const [selected, setSelected] = useState(0);
   const [conn, setConn] = useState<ConnStatus>("connecting");
   const connRef = useRef<Connection | null>(null);
   const sessionKey = useRef(`cli:${Date.now()}`);
@@ -64,11 +76,31 @@ export function App({ socketPath, session }: AppProps) {
     { isActive: Boolean(active) },
   );
 
+  // Slash-command palette: `/` opens a filtered, arrow-navigable hint list.
+  const slashQuery = input.startsWith("/") ? input.slice(1).split(/\s+/)[0] ?? "" : null;
+  const matches = slashQuery !== null ? COMMANDS.filter((c) => c.name.startsWith(slashQuery)) : [];
+  const showPalette = matches.length > 0 && !active;
+
+  // Keep the highlight on the best match as the query narrows.
+  useEffect(() => setSelected(0), [slashQuery]);
+
+  useInput(
+    (_input, key) => {
+      if (key.upArrow) setSelected((s) => Math.max(0, s - 1));
+      else if (key.downArrow) setSelected((s) => Math.min(matches.length - 1, s + 1));
+    },
+    { isActive: showPalette },
+  );
+
   function submit(line: string): void {
     const text = line.trim();
     setInput("");
     if (!text) return;
-    if (text.startsWith("/")) return command(text.slice(1).split(/\s+/)[0] ?? "");
+    if (text.startsWith("/")) {
+      // Enter runs the highlighted suggestion (falling back to what was typed).
+      const typed = text.slice(1).split(/\s+/)[0] ?? "";
+      return command(matches[selected]?.name ?? typed);
+    }
     setState((s) => pushUser(s, text));
     connRef.current?.send(sessionKey.current, text);
   }
@@ -105,6 +137,7 @@ export function App({ socketPath, session }: AppProps) {
       <Transcript theme={theme} items={state.items} activeApprovalId={active?.approvalId} />
 
       <Box marginTop={1} flexDirection="column">
+        {showPalette ? <CommandPalette theme={theme} matches={matches} selected={selected} /> : null}
         {active ? (
           <Text color={theme.muted}>respond to the approval above — a / A / d</Text>
         ) : conn === "disconnected" ? (
