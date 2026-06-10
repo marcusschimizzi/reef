@@ -34,44 +34,49 @@ const coral: Theme = {
   error: "#fb7185", // coral-red
 };
 
-// Purple direction (default): a nocturnal-reef glow — violet brand with a cool
-// periwinkle accent. Deliberately not coral, to read as distinctly *not* Claude Code.
+// Violet is the brand color across every purple theme; they differ ONLY in the
+// `secondary` accent, which is spent exceedingly sparingly (essentially just the
+// git-branch tag — cf. Claude Code's teal branch badge). Pick the accent you
+// like via REEF_THEME; the octopus and wordmark stay violet regardless.
+const VIOLET = "#a78bfa";
+
+// Periwinkle accent (the original).
 const purple: Theme = {
   name: "purple",
-  primary: "#a78bfa", // violet
-  secondary: "#818cf8", // periwinkle (borders, branch tag)
-  muted: "#8b8298", // dusk-grey
+  primary: VIOLET,
+  secondary: "#818cf8", // periwinkle
+  muted: "#8b8298",
   ok: "#34d399",
   warn: "#fbbf24",
   error: "#fb7185",
 };
 
-// Indigo: a bluer, deeper brand than violet.
-const indigo: Theme = {
-  name: "indigo",
-  primary: "#818cf8", // indigo
-  secondary: "#c4b5fd", // soft violet accent
-  muted: "#828aa3",
-  ok: "#34d399",
-  warn: "#fbbf24",
-  error: "#fb7185",
-};
-
-// Teal: a cool sea-glass scheme — a teal octopus, aqua accents.
+// Violet brand + teal accent (default) — the rare accent reads cool & distinct.
 const teal: Theme = {
   name: "teal",
-  primary: "#2dd4bf", // teal
-  secondary: "#5eead4", // aqua accent
-  muted: "#7d8a99",
+  primary: VIOLET,
+  secondary: "#2dd4bf", // teal accent
+  muted: "#8b8298",
   ok: "#34d399",
   warn: "#fbbf24",
   error: "#fb7185",
 };
 
-const THEMES: Record<string, Theme> = { coral, purple, indigo, teal };
+// Violet brand + indigo accent — a subtler, analogous accent.
+const indigo: Theme = {
+  name: "indigo",
+  primary: VIOLET,
+  secondary: "#6366f1", // indigo accent
+  muted: "#8b8298",
+  ok: "#34d399",
+  warn: "#fbbf24",
+  error: "#fb7185",
+};
+
+const THEMES: Record<string, Theme> = { coral, purple, teal, indigo };
 
 export function resolveTheme(name = process.env.REEF_THEME): Theme {
-  return THEMES[name ?? ""] ?? purple;
+  return THEMES[name ?? ""] ?? teal;
 }
 
 /** Lighten (amt > 0, toward white) or darken (amt < 0, toward black) a hex color

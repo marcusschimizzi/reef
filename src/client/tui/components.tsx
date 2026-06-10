@@ -34,8 +34,7 @@ function PixelSprite({ rows, body }: { rows: string[]; body: string }) {
 }
 
 export function AvatarArt({ theme, avatar }: { theme: Theme; avatar: Avatar }) {
-  if (avatar.kind === "pixel") return <PixelSprite rows={avatar.rows} body={theme.primary} />;
-  return <Text color={theme.primary}>{avatar.art}</Text>;
+  return <PixelSprite rows={avatar.rows} body={theme.primary} />;
 }
 
 // Presentational Ink components. Color is an accent only (see theme.ts): body
@@ -64,7 +63,7 @@ export function Banner({ theme, session }: { theme: Theme; session: SessionInfo 
       <Box
         flexDirection="column"
         borderStyle="round"
-        borderColor={theme.secondary}
+        borderColor={theme.muted}
         paddingX={1}
         marginTop={1}
         alignSelf="flex-start"
@@ -97,10 +96,10 @@ function ToolView({ theme, item }: { theme: Theme; item: Extract<TranscriptItem,
   return (
     <Box flexDirection="column">
       <Text color={theme.muted}>
-        <Text color={theme.secondary}>⚙</Text> <Text>{item.name}</Text>
+        <Text color={theme.muted}>⚙</Text> <Text>{item.name}</Text>
         <Text color={theme.muted}>({summarize(item.input, 60)})</Text>{" "}
         {item.status === "running" ? (
-          <Text color={theme.secondary}>
+          <Text color={theme.muted}>
             <Spinner type="dots" />
           </Text>
         ) : item.status === "ok" ? (

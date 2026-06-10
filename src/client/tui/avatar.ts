@@ -1,45 +1,38 @@
-// Reef's brand art. The octopus is a switchable registry (REEF_AVATAR=…) so the
-// directions can be compared live in-terminal. Line variants are colored as a
-// whole; the `pixel` variant is a half-block sprite — a small pixel grid drawn
-// with ▀/▄ and per-cell fg+bg color, which doubles vertical resolution (the
-// technique behind polished CLI mascots). 'o' = body, 'e' = eye, '.' = empty.
+// Reef's brand art. The octopus is a half-block pixel sprite — a small pixel
+// grid drawn with ▀/▄ and per-cell fg+bg color, which doubles vertical
+// resolution (the technique behind polished CLI mascots). 'o' = body,
+// 'h' = highlight, 'e' = eye, '.' = empty.
+//
+// Variants explore different ARM stances over the same elongated mantle; switch
+// with REEF_AVATAR to compare live. (The mantle shape is settled — `pixel`.)
 
-export interface LineAvatar {
-  kind: "line";
-  art: string;
-}
-export interface PixelAvatar {
-  kind: "pixel";
+export interface Avatar {
   rows: string[];
 }
-export type Avatar = LineAvatar | PixelAvatar;
 
-const line = (art: string): LineAvatar => ({
-  kind: "line",
-  art: art.replace(/^\n/, "").replace(/\n$/, ""),
-});
+// Shared elongated mantle (rows 0–12) — the octopus head. Each variant appends
+// its own tentacle stance.
+const MANTLE = [
+  "......oooooo......",
+  ".....ohhhhhho.....",
+  "....ohhhhhhhho....",
+  "...ohhhhhhhhhho...",
+  "..ohhhhhhhhhhhho..",
+  "..oooooooooooooo..",
+  "..oooooooooooooo..",
+  "..oooeeooooeeooo..",
+  "..oooeeooooeeooo..",
+  "..oooooooooooooo..",
+  "...oooooooooooo...",
+  "...oooooooooooo...",
+  "....oooooooooo....",
+];
 
 export const AVATARS: Record<string, Avatar> = {
-  // Half-block colored sprite — the default. Tall elongated mantle (the octopus
-  // signature, vs a crab's wide flat body), a highlight sheen up top, and
-  // tentacles that splay wider than the head and curl at the tips.
-  // 'o' body · 'h' highlight · 'e' eye · '.' empty. 20 px tall → 10 text rows.
+  // Default — arms splay outward with a modest curl at the outer tips.
   pixel: {
-    kind: "pixel",
     rows: [
-      "......oooooo......",
-      ".....ohhhhhho.....",
-      "....ohhhhhhhho....",
-      "...ohhhhhhhhhho...",
-      "..ohhhhhhhhhhhho..",
-      "..oooooooooooooo..",
-      "..oooooooooooooo..",
-      "..oooeeooooeeooo..",
-      "..oooeeooooeeooo..",
-      "..oooooooooooooo..",
-      "...oooooooooooo...",
-      "...oooooooooooo...",
-      "....oooooooooo....",
+      ...MANTLE,
       "..oo.oo.oo.oo.oo..",
       ".oo..oo.oo.oo..oo.",
       "oo...o..oo..o...oo",
@@ -48,77 +41,30 @@ export const AVATARS: Record<string, Avatar> = {
       ".......oo.oo......",
     ],
   },
-  // Variant: rounder, wider, shorter mantle (a fuller dome).
-  "pixel-dome": {
-    kind: "pixel",
+  // Arms sweep wide to the edges, then hook back inward — a dramatic curl.
+  "pixel-curl": {
     rows: [
-      ".....oooooooo.....",
-      "...oohhhhhhhhoo...",
-      "..ohhhhhhhhhhhho..",
-      ".oohhhhhhhhhhhhoo.",
-      ".oooooooooooooooo.",
-      ".oooooooooooooooo.",
-      ".oooeeoooooeeoooo.",
-      ".oooeeoooooeeoooo.",
-      ".oooooooooooooooo.",
-      "..oooooooooooooo..",
-      "...oooooooooooo...",
-      "....oooooooooo....",
+      ...MANTLE,
       "..oo.oo.oo.oo.oo..",
       ".oo..oo.oo.oo..oo.",
-      "oo...o..oo..o...oo",
-      "o....oo.oo.oo....o",
-      "oo....o....o....oo",
+      "oo...oo.oo.oo...oo",
+      "oo..o...oo...o..oo",
+      ".oo.....oo.....oo.",
+      "..o.....oo.....o..",
+    ],
+  },
+  // Arms hang close and straight — a calm, resting stance.
+  "pixel-hang": {
+    rows: [
+      ...MANTLE,
+      "...oo.oo.oo.oo....",
+      "...o.oo.oo.oo.o...",
+      "...o.o..oo..o.o...",
+      "...o.o..oo..o.o...",
+      "....o..o..o..o....",
       ".......oo.oo......",
     ],
   },
-  // Variant: narrower, taller mantle (most elongated head).
-  "pixel-tall": {
-    kind: "pixel",
-    rows: [
-      ".......oooo.......",
-      "......oooooo......",
-      ".....ohhhhhho.....",
-      "....ohhhhhhhho....",
-      "...ohhhhhhhhhho...",
-      "...oohhhhhhhhoo...",
-      "...oooooooooooo...",
-      "...oooooooooooo...",
-      "...ooeeoooeeooo...",
-      "...ooeeoooeeooo...",
-      "...oooooooooooo...",
-      "...oooooooooooo...",
-      "....oooooooooo....",
-      "..oo.oo.oo.oo.oo..",
-      ".oo..oo.oo.oo..oo.",
-      "oo...o..oo..o...oo",
-      "o....oo.oo.oo....o",
-      "oo....o....o....oo",
-      ".......oo.oo......",
-    ],
-  },
-  domed: line(`
-   ▁▁▁▁
-  ╱◕  ◕╲
-  ▏ ‿  ▕
-  ╲┳┳┳┳╱
-   ╹╹╹╹`),
-  curling: line(`
-  ╭──────╮
-  │ ◕  ◕ │
-  ╰┬┬┬┬┬┬╯
-  ╲╱╲╱╲╱╲
-   ╰╯ ╰╯`),
-  kawaii: line(`
-  ╭⌒⌒⌒╮
- ( ◕  ◕ )
-  ╰╮╭╮╭╯
-   ╰╯╰╯`),
-  block: line(`
-  ▟▀▀▀▀▀▙
-  ▌ ◕  ◕ ▐
-  ▙▄▄▄▄▄▟
-   ▎▎ ▎▎ ▎▎`),
 };
 
 export const DEFAULT_AVATAR = "pixel";
