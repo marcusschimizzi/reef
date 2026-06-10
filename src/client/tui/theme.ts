@@ -34,11 +34,12 @@ const coral: Theme = {
   error: "#fb7185", // coral-red
 };
 
-// Purple direction: a deeper, more nocturnal reef glow.
+// Purple direction (default): a nocturnal-reef glow — violet brand with a cool
+// periwinkle accent. Deliberately not coral, to read as distinctly *not* Claude Code.
 const purple: Theme = {
   name: "purple",
-  primary: "#c084fc", // bright violet
-  secondary: "#8b5cf6", // amethyst
+  primary: "#a78bfa", // violet
+  secondary: "#818cf8", // periwinkle (borders, branch tag)
   muted: "#8b8298", // dusk-grey
   ok: "#34d399",
   warn: "#fbbf24",
@@ -48,5 +49,18 @@ const purple: Theme = {
 const THEMES: Record<string, Theme> = { coral, purple };
 
 export function resolveTheme(name = process.env.REEF_THEME): Theme {
-  return THEMES[name ?? ""] ?? coral;
+  return THEMES[name ?? ""] ?? purple;
+}
+
+/** Lighten (amt > 0, toward white) or darken (amt < 0, toward black) a hex color
+ *  by a fraction in [-1, 1] — used to derive sprite shading tones from a base. */
+export function shade(hex: string, amt: number): string {
+  const n = parseInt(hex.replace("#", ""), 16);
+  const target = amt < 0 ? 0 : 255;
+  const p = Math.abs(amt);
+  const mix = (c: number): number => Math.round(c + (target - c) * p);
+  const r = mix((n >> 16) & 255);
+  const g = mix((n >> 8) & 255);
+  const b = mix(n & 255);
+  return `#${((r << 16) | (g << 8) | b).toString(16).padStart(6, "0")}`;
 }

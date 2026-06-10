@@ -2,16 +2,18 @@ import type { ReactNode } from "react";
 import { Box, Text } from "ink";
 import Spinner from "ink-spinner";
 import { resolveAvatar, WORDMARK, TAGLINE, type Avatar } from "./avatar.js";
-import type { Theme } from "./theme.js";
+import { shade, type Theme } from "./theme.js";
 import type { RunStatus, TranscriptItem, UsageTotals } from "./transcript.js";
 
 const EYE = "#1b1f24"; // near-black eyes read as holes in the colored body
 
 /** Render a pixel grid as half-block rows: two pixel rows per text row, using
- *  ▀ with fg = top pixel and bg = bottom pixel (doubling vertical resolution). */
+ *  ▀ with fg = top pixel and bg = bottom pixel (doubling vertical resolution).
+ *  'o' body · 'h' highlight (lighter body) · 'e' eye · '.' transparent. */
 function PixelSprite({ rows, body }: { rows: string[]; body: string }) {
+  const highlight = shade(body, 0.34);
   const colorOf = (ch: string | undefined): string | undefined =>
-    ch === "o" ? body : ch === "e" ? EYE : undefined;
+    ch === "o" ? body : ch === "h" ? highlight : ch === "e" ? EYE : undefined;
   const lines: ReactNode[] = [];
   for (let y = 0; y < rows.length; y += 2) {
     const top = rows[y] ?? "";

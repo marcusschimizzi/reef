@@ -20,22 +20,32 @@ const line = (art: string): LineAvatar => ({
 });
 
 export const AVATARS: Record<string, Avatar> = {
-  // Half-block colored sprite — the default, most "mascot"-like.
+  // Half-block colored sprite — the default. Tall elongated mantle (the octopus
+  // signature, vs a crab's wide flat body), a highlight sheen up top, and
+  // tentacles that splay wider than the head and curl at the tips.
+  // 'o' body · 'h' highlight · 'e' eye · '.' empty. 20 px tall → 10 text rows.
   pixel: {
     kind: "pixel",
     rows: [
-      "....oooooo....",
-      "..oooooooooo..",
-      ".oooooooooooo.",
-      "oooooooooooooo",
-      "ooeeooooooeeoo",
-      "ooeeooooooeeoo",
-      "oooooooooooooo",
-      ".oooooooooooo.",
-      "..oooooooooo..",
-      "..oo.oo.oo.oo.",
-      "..o..o..o..o..",
-      "..o..o..o..o..",
+      "......oooooo......",
+      ".....ohhhhhho.....",
+      "....ohhhhhhhho....",
+      "...ohhhhhhhhhho...",
+      "..ohhhhhhhhhhhho..",
+      "..oooooooooooooo..",
+      "..oooooooooooooo..",
+      "..oooeeooooeeooo..",
+      "..oooeeooooeeooo..",
+      "..oooooooooooooo..",
+      "...oooooooooooo...",
+      "...oooooooooooo...",
+      "....oooooooooo....",
+      "..oo.oo.oo.oo.oo..",
+      ".oo..oo.oo.oo..oo.",
+      "oo...o..oo..o...oo",
+      "o....oo.oo.oo....o",
+      "oo....o....o....oo",
+      ".......oo.oo......",
     ],
   },
   domed: line(`
