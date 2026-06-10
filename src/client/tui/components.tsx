@@ -3,7 +3,7 @@ import { Box, Text } from "ink";
 import Spinner from "ink-spinner";
 import { resolveAvatar, WORDMARK, TAGLINE, type Avatar } from "./avatar.js";
 import { shade, type Theme } from "./theme.js";
-import { parseInline, parseSegments } from "./markdown.js";
+import { parseInline, parseSegments, visibleWhileStreaming } from "./markdown.js";
 import { tokenizeLine, usesHashComments, type TokenClass } from "./highlight.js";
 import type { RunStatus, TranscriptItem, UsageTotals } from "./transcript.js";
 
@@ -288,8 +288,23 @@ function AssistantView({
   theme: Theme;
   item: Extract<TranscriptItem, { kind: "assistant" }>;
 }) {
-  const segments = parseSegments(item.text);
+  // While streaming, reveal only complete lines (line-by-line, not char-by-char).
+  const visible = item.streaming ? visibleWhileStreaming(item.text) : item.text;
   const cursor = item.streaming ? <Text color={theme.muted}>▌</Text> : null;
+
+  // Before the first full line lands, show just the label + cursor.
+  if (item.streaming && visible === "") {
+    return (
+      <Text>
+        <Text color={theme.primary} bold>
+          reef{" "}
+        </Text>
+        {cursor}
+      </Text>
+    );
+  }
+
+  const segments = parseSegments(visible);
   const first = segments[0];
   const simple = segments.length === 1 && first?.kind === "text" && !first.text.includes("\n");
 

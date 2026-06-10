@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseInline, parseSegments } from "../../src/client/tui/markdown.js";
+import { parseInline, parseSegments, visibleWhileStreaming } from "../../src/client/tui/markdown.js";
 
 describe("parseSegments", () => {
   it("returns a single text segment when there is no code", () => {
@@ -64,5 +64,14 @@ describe("parseInline", () => {
 
   it("leaves an unterminated marker as literal text", () => {
     expect(parseInline("**Files")).toEqual([{ text: "**Files" }]);
+  });
+});
+
+describe("visibleWhileStreaming", () => {
+  it("reveals only complete lines, hiding the trailing partial line", () => {
+    expect(visibleWhileStreaming("line one\nline two\npartial thi")).toBe("line one\nline two\n");
+  });
+  it("shows nothing until the first newline", () => {
+    expect(visibleWhileStreaming("still on the first line")).toBe("");
   });
 });

@@ -72,6 +72,17 @@ export function parseInline(text: string): InlineSpan[] {
   return spans;
 }
 
+/**
+ * While a reply streams, show only up to the last COMPLETE line — the half-typed
+ * trailing line stays buffered and invisible, so text advances line-by-line
+ * instead of character-by-character (Claude Code's trick for smooth streaming;
+ * the per-token state writes are coalesced by Ink's own ~16ms render throttle).
+ * Returns "" until the first newline arrives.
+ */
+export function visibleWhileStreaming(text: string): string {
+  return text.slice(0, text.lastIndexOf("\n") + 1);
+}
+
 const FENCE = /^\s*```(.*)$/;
 
 export function parseSegments(text: string): Segment[] {
