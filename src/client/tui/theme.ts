@@ -46,7 +46,29 @@ const purple: Theme = {
   error: "#fb7185",
 };
 
-const THEMES: Record<string, Theme> = { coral, purple };
+// Indigo: a bluer, deeper brand than violet.
+const indigo: Theme = {
+  name: "indigo",
+  primary: "#818cf8", // indigo
+  secondary: "#c4b5fd", // soft violet accent
+  muted: "#828aa3",
+  ok: "#34d399",
+  warn: "#fbbf24",
+  error: "#fb7185",
+};
+
+// Teal: a cool sea-glass scheme — a teal octopus, aqua accents.
+const teal: Theme = {
+  name: "teal",
+  primary: "#2dd4bf", // teal
+  secondary: "#5eead4", // aqua accent
+  muted: "#7d8a99",
+  ok: "#34d399",
+  warn: "#fbbf24",
+  error: "#fb7185",
+};
+
+const THEMES: Record<string, Theme> = { coral, purple, indigo, teal };
 
 export function resolveTheme(name = process.env.REEF_THEME): Theme {
   return THEMES[name ?? ""] ?? purple;
