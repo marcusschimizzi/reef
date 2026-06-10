@@ -6,7 +6,6 @@ import {
   Banner,
   CommandPalette,
   ItemView,
-  Mascot,
   StatusBar,
   Transcript,
   type Command,
@@ -179,9 +178,6 @@ export function App({ socketPath, session }: AppProps) {
             <TextInput value={input} onChange={setInput} onSubmit={submit} placeholder="ask reef…" />
           </Box>
         )}
-        <Box marginTop={1}>
-          <Mascot theme={theme} active={state.status === "working"} />
-        </Box>
         <StatusBar theme={theme} status={state.status} usage={state.usage} agentId={session.agentId} />
       </Box>
     </Box>

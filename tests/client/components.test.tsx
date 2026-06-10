@@ -64,7 +64,7 @@ describe("TUI components", () => {
       <StatusBar theme={theme} status="working" usage={{ inputTokens: 12, outputTokens: 3 }} agentId="reef" />,
     );
     const out = lastFrame() ?? "";
-    expect(out).toContain("working");
+    expect(out).toMatch(/Working…|Thinking…/); // the animated activity verb
     expect(out).toContain("↑12");
   });
 });

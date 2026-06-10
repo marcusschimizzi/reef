@@ -39,26 +39,25 @@ export function AvatarArt({ theme, avatar }: { theme: Theme; avatar: Avatar }) {
   return <PixelSprite rows={avatar.rows} body={theme.primary} />;
 }
 
-// The persistent live-region mascot. The banner octopus is frozen in <Static>,
-// so this small one carries the "alive" feeling: calm with the occasional blink
-// when idle, an energetic tentacle wiggle while a run is in flight. Frames are
-// half-block grids; the BLINK frame drops the eyes (e → body).
-const BASE = ["...oooooo...", "..oooooooo..", ".oeeooooeeo.", ".oooooooooo.", "..o..oo..o..", ".o...oo...o."];
-const BLINK = ["...oooooo...", "..oooooooo..", ".oooooooooo.", ".oooooooooo.", "..o..oo..o..", ".o...oo...o."];
-const WIGGLE = ["...oooooo...", "..oooooooo..", ".oeeooooeeo.", ".oooooooooo.", "...o.oo.o...", "..o..oo..o.."];
+// A compact one-line activity indicator (à la Claude Code's spinner): a pulsing
+// reef anemone/coral burst plus a rotating reef-flavored verb. Lives inline in
+// the status bar while a run is in flight — no vertical footprint.
+const PULSE = ["✶", "✷", "✸", "✹", "✺", "✹", "✸", "✷"];
+const VERBS = ["Working", "Thinking", "Pondering", "Surfacing", "Diving", "Drifting"];
 
-// Idle: mostly still, a slow blink. Working: alternate wiggle + blink, quickly.
-const IDLE_FRAMES: string[][] = [BASE, BASE, BASE, BASE, BASE, BLINK];
-const WORK_FRAMES: string[][] = [BASE, WIGGLE, BASE, BLINK];
-
-export function Mascot({ theme, active }: { theme: Theme; active: boolean }) {
+export function Activity({ theme }: { theme: Theme }) {
   const [tick, setTick] = useState(0);
   useEffect(() => {
-    const t = setInterval(() => setTick((x) => x + 1), active ? 320 : 900);
+    const t = setInterval(() => setTick((x) => x + 1), 130);
     return () => clearInterval(t);
-  }, [active]);
-  const frames = active ? WORK_FRAMES : IDLE_FRAMES;
-  return <PixelSprite rows={frames[tick % frames.length]!} body={theme.primary} />;
+  }, []);
+  const glyph = PULSE[tick % PULSE.length]!;
+  const verb = VERBS[Math.floor(tick / 18) % VERBS.length]!;
+  return (
+    <Text color={theme.muted}>
+      <Text color={theme.primary}>{glyph}</Text> {verb}…
+    </Text>
+  );
 }
 
 // Presentational Ink components. Color is an accent only (see theme.ts): body
@@ -430,12 +429,7 @@ export function StatusBar({
     <Box justifyContent="space-between">
       <Box>
         {status === "working" ? (
-          <Text color={theme.muted}>
-            <Text color={theme.primary}>
-              <Spinner type="dots" />
-            </Text>{" "}
-            working…
-          </Text>
+          <Activity theme={theme} />
         ) : status === "awaiting_approval" ? (
           <Text color={theme.warn}>● awaiting approval</Text>
         ) : (
