@@ -15,11 +15,15 @@ npm run daemon   # start the agent daemon (unix socket + HTTP/SSE on :9876)
 npm run tui      # the Ink terminal UI, in a second shell
 ```
 
-Set `ANTHROPIC_API_KEY` in `.env` (see `.env.example`). State lives in `./.reef`
-(SQLite db, workspaces, control socket).
+Set `ANTHROPIC_API_KEY` in `.env` (see `.env.example`). State lives in `~/.reef`
+(SQLite db, workspaces, control socket, config, policy) — cwd-independent, since
+the daemon is a persistent personal service. Set `REEF_HOME` to relocate it (e.g.
+`REEF_HOME=$PWD/.reef` to keep state repo-local while hacking on reef).
 
 ### Useful env
 
+- `REEF_HOME` — state directory (default `~/.reef`); the daemon, TUI, and config
+  CLI all resolve it, so they stay in sync.
 - `REEF_HTTP_PORT` (default `9876`), `REEF_API_KEY` — HTTP interface.
 - `REEF_HEARTBEAT_MINUTES` — opt-in self-maintenance heartbeat cadence (`0`/unset = off).
 - `REEF_MODEL` — model the default agent uses, as `provider/model` (a bare id is

@@ -1,14 +1,15 @@
 import { render } from "ink";
 import { execSync } from "node:child_process";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
+import { reefHome } from "../core/paths.js";
 import { App } from "./tui/App.js";
 
 // The reef TUI entrypoint: gather a little session context, then hand off to the
 // Ink app, which connects to the daemon over the unix socket and renders the
 // native event stream.
 
-const socketPath = join(resolve(".reef"), "reef.sock");
-const configPath = process.env.REEF_CONFIG_FILE || join(resolve(".reef"), "config.json");
+const socketPath = join(reefHome(), "reef.sock");
+const configPath = process.env.REEF_CONFIG_FILE || join(reefHome(), "config.json");
 
 function gitBranch(): string | undefined {
   try {

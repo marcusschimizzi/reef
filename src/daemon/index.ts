@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { loadEnv } from "../core/env.js";
+import { reefHome } from "../core/paths.js";
 import type { AgentRecord } from "../core/types.js";
 import { startHttpInterface } from "../interface/http.js";
 import { Daemon } from "./Daemon.js";
@@ -12,7 +13,7 @@ import { startSocketServer } from "./socket.js";
 
 loadEnv();
 
-const STATE_DIR = resolve(".reef");
+const STATE_DIR = reefHome(); // ~/.reef by default; REEF_HOME overrides
 const SOCKET_PATH = join(STATE_DIR, "reef.sock");
 const HTTP_PORT = Number(process.env.REEF_HTTP_PORT ?? 9876);
 const HTTP_API_KEY = process.env.REEF_API_KEY || undefined;

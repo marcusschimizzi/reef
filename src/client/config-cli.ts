@@ -1,4 +1,5 @@
-import { join, resolve } from "node:path";
+import { join } from "node:path";
+import { reefHome } from "../core/paths.js";
 import {
   applyConfigEdit,
   readRawConfig,
@@ -154,7 +155,7 @@ function formatValue(value: unknown): string {
 
 /** Entry point — wires runConfigCli to the real config file. */
 export function main(argv: string[]): void {
-  const path = process.env.REEF_CONFIG_FILE || join(resolve(".reef"), "config.json");
+  const path = process.env.REEF_CONFIG_FILE || join(reefHome(), "config.json");
   const io: ConfigIo = {
     path,
     read: () => readRawConfig(path),
