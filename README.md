@@ -31,6 +31,17 @@ Set `ANTHROPIC_API_KEY` in `.env` (see `.env.example`). State lives in `./.reef`
 - `REEF_LOG=off` — silence run-lifecycle logging.
 - `REEF_THEME`, `REEF_AVATAR` — TUI look (`teal` + `pixel` by default).
 
+## Configuration
+
+Non-secret settings live in `.reef/config.json` (or `REEF_CONFIG_FILE`) — see
+`config.example.json`. It's optional and fail-soft: a missing or invalid file
+falls back to defaults, never crashing the daemon. Keys: `defaultModel`,
+`providers` (custom OpenAI-/Anthropic-compatible endpoints like Z.ai or OpenCode
+Go, extending the built-ins), and `policyFile`. **Secrets never go here** — a
+provider names the env var its key comes from (`apiKeyEnv`). An env var overrides
+the matching config key (`REEF_MODEL`, `REEF_POLICY_FILE`), so the precedence is
+env → config → built-in default.
+
 ## Approval policy
 
 Whether a tool call runs, asks for approval, or is refused is decided by an

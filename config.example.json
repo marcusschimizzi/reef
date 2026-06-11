@@ -1,0 +1,24 @@
+{
+  "$comment": "Reef config. Copy to .reef/config.json (or point REEF_CONFIG_FILE at it). All keys optional; a missing/invalid file falls back to defaults. Secrets are NEVER stored here — a provider names the env var its key comes from (apiKeyEnv). Env vars override any single key (REEF_MODEL, REEF_POLICY_FILE).",
+
+  "defaultModel": "claude-opus-4-8",
+
+  "policyFile": ".reef/policy.json",
+
+  "providers": [
+    {
+      "$comment": "Z.ai coding plan (GLM models) via its OpenAI-compatible endpoint. Replace baseURL with the one from Z.ai's docs; set ZAI_API_KEY in the environment. Use e.g. defaultModel: zai/glm-4.6",
+      "id": "zai",
+      "kind": "openai-compatible",
+      "baseURL": "https://api.z.ai/api/paas/v4",
+      "apiKeyEnv": "ZAI_API_KEY"
+    },
+    {
+      "$comment": "OpenCode Go subscription gateway (open-source models). Fill in the baseURL from opencode.ai/docs; set OPENCODE_API_KEY. Then e.g. defaultModel: opencode/glm-5.1",
+      "id": "opencode",
+      "kind": "openai-compatible",
+      "baseURL": "https://opencode.ai/zen/v1",
+      "apiKeyEnv": "OPENCODE_API_KEY"
+    }
+  ]
+}

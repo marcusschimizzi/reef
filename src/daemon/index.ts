@@ -5,7 +5,9 @@ import type { AgentRecord } from "../core/types.js";
 import { startHttpInterface } from "../interface/http.js";
 import { Daemon } from "./Daemon.js";
 import { attachRunLogger } from "./log.js";
+import { loadConfig } from "../config/config.js";
 import { loadPolicy } from "../policy/config.js";
+import { VercelRouter } from "../model/router.js";
 import { startSocketServer } from "./socket.js";
 
 loadEnv();
@@ -16,8 +18,13 @@ const HTTP_PORT = Number(process.env.REEF_HTTP_PORT ?? 9876);
 const HTTP_API_KEY = process.env.REEF_API_KEY || undefined;
 // Self-maintenance heartbeat cadence; 0 / unset = no heartbeat (opt-in).
 const HEARTBEAT_MINUTES = Number(process.env.REEF_HEARTBEAT_MINUTES ?? 0);
-// Approval-policy config; default location is .reef/policy.json (absent = DefaultPolicy).
-const POLICY_FILE = process.env.REEF_POLICY_FILE || join(STATE_DIR, "policy.json");
+
+const log = (m: string): void => void process.stderr.write(`${m}\n`);
+
+// Settings: a fail-soft config file, with env overriding any single key.
+const config = loadConfig(process.env.REEF_CONFIG_FILE || join(STATE_DIR, "config.json"), log);
+const POLICY_FILE = process.env.REEF_POLICY_FILE || config.policyFile || join(STATE_DIR, "policy.json");
+const DEFAULT_MODEL = process.env.REEF_MODEL || config.defaultModel || "claude-opus-4-8";
 mkdirSync(STATE_DIR, { recursive: true });
 
 // The one v1 agent. "Add an agent" later is another record, not new code.
@@ -38,9 +45,9 @@ const DEFAULT_AGENT: AgentRecord = {
     "You can inspect your own operational state with list_runs, list_sessions, and " +
     "list_triggers. " +
     "Use the available tools when they help accomplish the task.",
-  // `provider/model` (e.g. ollama/llama3.1, openrouter/…) — bare id = Anthropic.
-  // Set REEF_MODEL to run dev on a cheap/free model; config supersedes this later.
-  model: process.env.REEF_MODEL || "claude-opus-4-8",
+  // Resolved from env REEF_MODEL > config.defaultModel > built-in default, as
+  // `provider/model` (e.g. ollama/llama3.1, openrouter/…); bare id = Anthropic.
+  model: DEFAULT_MODEL,
   toolAllowlist: [
     "echo",
     "get_time",
@@ -63,7 +70,8 @@ const DEFAULT_AGENT: AgentRecord = {
 const daemon = new Daemon({
   dbPath: join(STATE_DIR, "reef.db"),
   workspaceDir: join(STATE_DIR, "workspaces"),
-  policy: loadPolicy(POLICY_FILE, (m) => process.stderr.write(`${m}\n`)),
+  router: new VercelRouter(config.providers), // built-ins + any custom config providers
+  policy: loadPolicy(POLICY_FILE, log),
 });
 daemon.registerAgent(DEFAULT_AGENT);
 
