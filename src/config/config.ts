@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { z } from "zod";
 import type { ProviderConfig } from "../model/providers.js";
+import type { SurfaceConfig } from "../surfaces/index.js";
 
 // Reef's user configuration — the one place non-secret settings live (the rest
 // was scattered across env vars and hardcoded defaults). Mirrors the policy
@@ -19,6 +20,18 @@ const providerSchema = z.object({
   apiKeyEnv: z.string().optional(),
 });
 
+// Surfaces: outbound channels (desktop notification, webhook). A webhook's URL
+// can be a literal or `urlEnv` (an env var name) for secret URLs like Slack's.
+const surfaceSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("desktop") }),
+  z.object({
+    kind: z.literal("webhook"),
+    url: z.string().optional(),
+    urlEnv: z.string().optional(),
+    headers: z.record(z.string(), z.string()).optional(),
+  }),
+]);
+
 const configSchema = z.object({
   /** Default agent model as `provider/model` (env REEF_MODEL still overrides). */
   defaultModel: z.string().optional(),
@@ -26,15 +39,24 @@ const configSchema = z.object({
   providers: z.array(providerSchema).optional(),
   /** Path to the approval-policy file (env REEF_POLICY_FILE still overrides). */
   policyFile: z.string().optional(),
+  /** Outbound notification channels for proactive approval requests. */
+  surfaces: z.array(surfaceSchema).optional(),
+  /** Proactive runs: "deny" gated tools (default) or "route" (suspend + notify). */
+  proactiveApproval: z.enum(["deny", "route"]).optional(),
+  /** Seconds before an unanswered routed approval auto-denies (default 3600). */
+  proactiveApprovalTimeoutSeconds: z.number().int().positive().optional(),
 });
 
 export interface ReefConfig {
   defaultModel?: string;
   providers: ProviderConfig[];
   policyFile?: string;
+  surfaces: SurfaceConfig[];
+  proactiveApproval: "deny" | "route";
+  proactiveApprovalTimeoutSeconds?: number;
 }
 
-const EMPTY: ReefConfig = { providers: [] };
+const EMPTY: ReefConfig = { providers: [], surfaces: [], proactiveApproval: "deny" };
 
 /** The raw config object on disk (unknown keys intact), or undefined if absent.
  *  Editors (the CLI, the TUI) work on the raw object so they preserve keys the
@@ -57,6 +79,9 @@ export function parseConfig(raw: unknown): ReefConfig {
     defaultModel: parsed.defaultModel,
     providers: parsed.providers ?? [],
     policyFile: parsed.policyFile,
+    surfaces: (parsed.surfaces ?? []) as SurfaceConfig[],
+    proactiveApproval: parsed.proactiveApproval ?? "deny",
+    proactiveApprovalTimeoutSeconds: parsed.proactiveApprovalTimeoutSeconds,
   };
 }
 

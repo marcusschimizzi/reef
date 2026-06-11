@@ -71,9 +71,9 @@ describe("runConfigCli", () => {
   });
 
   it("preserves unknown keys across an edit (forward-compat)", () => {
-    const x = io({ surfaces: [{ kind: "future" }] });
+    const x = io({ somethingNew: { future: true } });
     runConfigCli(["set", "defaultModel", "x"], x);
-    expect(x.current).toEqual({ surfaces: [{ kind: "future" }], defaultModel: "x" });
+    expect(x.current).toEqual({ somethingNew: { future: true }, defaultModel: "x" });
   });
 
   it("show prints the config and help prints usage", () => {
