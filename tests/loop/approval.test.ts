@@ -132,6 +132,27 @@ describe("suspend-for-approval", () => {
     spine.close();
   });
 
+  it("a proactive run auto-denies a gated tool and completes instead of deadlocking", async () => {
+    const { spine, events, deps, ranCount } = setup([gatedTurn, doneTurn]);
+    spine.appendMessage("s1", "user", [{ type: "text", text: "scheduled wake" }]);
+    const run = spine.createRun({ id: "run_pro", agentId: agent.id, sessionKey: "s1" });
+
+    const stop = await runAgentLoop(run, agent, deps, {
+      source: { kind: "trigger", triggerId: "trg_x", triggerType: "schedule" },
+    });
+
+    expect(stop).toBe("completed"); // not awaiting_approval — no deadlock
+    expect(spine.getRun("run_pro")?.status).toBe("completed");
+    expect(ranCount()).toBe(0); // the gated tool still never ran unattended
+    expect(spine.getApprovalsForRun("run_pro")).toHaveLength(0); // no orphan approval
+    expect(events.some((e) => e.type === "run.suspended")).toBe(false);
+    // the model got an isError tool_result telling it to proceed without the tool
+    const toolMsg = spine.getMessages("s1").find((m) => m.role === "tool");
+    expect(toolMsg?.content[0]).toMatchObject({ isError: true });
+    expect((toolMsg?.content[0] as { output: string }).output).toMatch(/no human available/);
+    spine.close();
+  });
+
   it("keeps the suspension durable across a daemon restart", async () => {
     const { dbPath, spine, deps } = setup([gatedTurn, doneTurn]);
     spine.appendMessage("s1", "user", [{ type: "text", text: "go" }]);

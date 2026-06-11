@@ -4,10 +4,12 @@ import { newRunId, newTriggerId } from "../core/ids.js";
 import { nowIso } from "../core/time.js";
 import type {
   AgentRecord,
+  Approval,
   ApprovalStatus,
   CatchUpPolicy,
   Run,
   RunSource,
+  RunStatus,
   Trigger,
   TriggerOrigin,
   TriggerSpec,
@@ -236,6 +238,28 @@ export class Daemon {
 
   listTriggers(agentId?: string): Trigger[] {
     return this.spine.listTriggers(agentId);
+  }
+
+  // ── runs (observability) ────────────────────────────────────────────────────
+  /** Recent runs, optionally filtered by status (most recent first). */
+  listRuns(opts: { status?: RunStatus; limit?: number } = {}): Run[] {
+    return this.spine.listRuns(opts);
+  }
+
+  /**
+   * Runs parked awaiting approval, each with its still-pending approvals — the
+   * data behind a "needs approval" view in conch / the TUI. Proactive runs no
+   * longer land here (they auto-deny), so in practice these are interactive runs
+   * whose approver hasn't answered yet.
+   */
+  runsAwaitingApproval(): Array<{ run: Run; approvals: Approval[] }> {
+    return this.spine
+      .listRuns({ status: "suspended" })
+      .filter((r) => r.stopReason === "awaiting_approval")
+      .map((run) => ({
+        run,
+        approvals: this.spine.getApprovalsForRun(run.id).filter((a) => a.status === "pending"),
+      }));
   }
 
   /**

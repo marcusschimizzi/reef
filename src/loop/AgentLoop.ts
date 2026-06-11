@@ -57,6 +57,12 @@ export async function runAgentLoop(
 ): Promise<StopReason> {
   const { spine, router, tools, toolContext } = deps;
   const maxSteps = deps.maxSteps ?? 20;
+  // A proactive run (trigger/heartbeat) has no human attached to its session, so
+  // a gated tool can't be approved — suspending would deadlock forever. Instead
+  // such runs auto-deny gated tools and continue (the dangerous tool still never
+  // runs unattended). The end state is to route the approval request out to a
+  // human surface; until then, deny-and-continue. See reef-proactive-approval.
+  const proactive = options.source?.kind === "trigger";
 
   const emit = (body: ReefEventBody): void =>
     deps.emit({ ...body, sessionKey: run.sessionKey, runId: run.id } as ReefEventInit);
@@ -121,9 +127,11 @@ export async function runAgentLoop(
         (b): b is ToolUse => b.type === "tool_use",
       );
 
-      // Suspend the whole turn if any tool in it needs approval.
+      // Suspend the whole turn if any tool in it needs approval — unless the run
+      // is proactive, in which case gated tools are auto-denied in executeTools
+      // (no approver exists) and the run continues rather than deadlocking.
       const gated = toolUses.filter((c) => tools.get(c.name)?.needsApproval);
-      if (gated.length > 0) {
+      if (gated.length > 0 && !proactive) {
         spine.updateStepOutput(run.id, index, {
           response: turn.content,
           usage: turn.usage,
@@ -152,7 +160,7 @@ export async function runAgentLoop(
 
       let toolResults: ContentBlock[] | undefined;
       if (turn.stop === "tool_use" && toolUses.length > 0) {
-        toolResults = await executeTools(toolUses, run, deps, emit);
+        toolResults = await executeTools(toolUses, run, deps, emit, proactive);
         spine.appendMessage(run.sessionKey, "tool", toolResults, run.id);
       }
 
@@ -188,13 +196,16 @@ export async function runAgentLoop(
 /**
  * Execute a turn's tool calls. Gated calls are governed by their durable
  * approval decision: denied → a denial result fed back to the model; allowed or
- * ungated → run. An errored tool is an input to the loop, not a run failure.
+ * ungated → run. In a proactive run a gated call has no approver, so it is
+ * auto-denied with a message that tells the model to proceed without it. An
+ * errored tool is an input to the loop, not a run failure.
  */
 async function executeTools(
   toolUses: ToolUse[],
   run: Run,
   deps: LoopDeps,
   emit: (body: ReefEventBody) => void,
+  proactive = false,
 ): Promise<ContentBlock[]> {
   const { spine, tools, toolContext } = deps;
   const approvals = new Map(
@@ -212,6 +223,17 @@ async function executeTools(
       input: call.input,
       needsApproval: tool?.needsApproval ?? false,
     });
+
+    // Proactive auto-deny: a gated tool in an unattended run, with no explicit
+    // approval, can't run — feed back a denial the model can adapt to.
+    if (proactive && tool?.needsApproval && approval?.status !== "allowed") {
+      const message =
+        "Approval required, but this run was started by a trigger with no human " +
+        "available to approve it — treated as denied. Continue without this tool.";
+      emit({ type: "tool.failed", toolUseId: call.id, error: message });
+      results.push({ type: "tool_result", toolUseId: call.id, output: message, isError: true });
+      continue;
+    }
 
     if (approval?.status === "denied") {
       const message = "The user denied this action.";

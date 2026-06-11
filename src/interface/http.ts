@@ -1,6 +1,6 @@
 import http from "node:http";
 import type { Daemon } from "../daemon/Daemon.js";
-import type { TriggerSpec } from "../core/types.js";
+import type { RunStatus, TriggerSpec } from "../core/types.js";
 import { ConchProjector } from "./adapters/conch.js";
 
 // Reef's HTTP + SSE interface — the front door consumers like conch attach to
@@ -91,6 +91,14 @@ async function handle(
     }
   }
 
+  if (method === "GET" && path === "/v1/runs") {
+    const status = url.searchParams.get("status");
+    if (status === "awaiting_approval") {
+      return sendJson(res, 200, { ok: true, runs: daemon.runsAwaitingApproval() });
+    }
+    return sendJson(res, 200, { ok: true, runs: daemon.listRuns({ status: asRunStatus(status) }) });
+  }
+
   const triggerToggle = path.match(/^\/v1\/triggers\/([^/]+)\/(enable|disable)$/);
   if (method === "POST" && triggerToggle) {
     const id = decodeURIComponent(triggerToggle[1] ?? "");
@@ -169,4 +177,9 @@ async function readJson(req: http.IncomingMessage): Promise<Record<string, unkno
 
 function str(v: unknown): string {
   return typeof v === "string" ? v : "";
+}
+
+const RUN_STATUSES: readonly RunStatus[] = ["running", "suspended", "completed", "failed"];
+function asRunStatus(v: string | null): RunStatus | undefined {
+  return v && (RUN_STATUSES as readonly string[]).includes(v) ? (v as RunStatus) : undefined;
 }

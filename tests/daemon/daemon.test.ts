@@ -126,6 +126,34 @@ describe("Daemon", () => {
     daemon.close();
   });
 
+  it("surfaces runs awaiting approval for observability", async () => {
+    const dir = tempDir();
+    const gatedAgent: AgentRecord = { ...agent, toolAllowlist: ["shell"] };
+    const daemon = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      router: new FakeRouter([
+        {
+          stop: "tool_use",
+          content: [{ type: "tool_use", id: "s1", name: "shell", input: { command: "echo hi" } }],
+          usage: { inputTokens: 5, outputTokens: 2 },
+        },
+      ]),
+    });
+    daemon.registerAgent(gatedAgent);
+
+    await daemon.submit({ sessionKey: "s1", agentId: "reef", message: "run a command" });
+
+    const waiting = daemon.runsAwaitingApproval();
+    expect(waiting).toHaveLength(1);
+    expect(waiting[0]?.run.sessionKey).toBe("s1");
+    expect(waiting[0]?.approvals).toHaveLength(1);
+    expect(waiting[0]?.approvals[0]?.toolName).toBe("shell");
+    // and it shows up in the status-filtered run list
+    expect(daemon.listRuns({ status: "suspended" }).map((r) => r.id)).toEqual([waiting[0]?.run.id]);
+    daemon.close();
+  });
+
   it("recovers an interrupted run by re-driving it from the durable record", async () => {
     const dir = tempDir();
     const dbPath = join(dir, "reef.db");

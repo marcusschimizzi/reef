@@ -4,6 +4,7 @@ import { loadEnv } from "../core/env.js";
 import type { AgentRecord } from "../core/types.js";
 import { startHttpInterface } from "../interface/http.js";
 import { Daemon } from "./Daemon.js";
+import { attachRunLogger } from "./log.js";
 import { startSocketServer } from "./socket.js";
 
 loadEnv();
@@ -54,6 +55,10 @@ const daemon = new Daemon({
   workspaceDir: join(STATE_DIR, "workspaces"),
 });
 daemon.registerAgent(DEFAULT_AGENT);
+
+// Structured run-lifecycle logging to stderr (set REEF_LOG=off to silence) — so
+// background/proactive runs are observable, not just rows in SQLite.
+if (process.env.REEF_LOG !== "off") attachRunLogger(daemon);
 
 await daemon.recover();
 daemon.start(); // begin firing scheduled triggers

@@ -332,6 +332,22 @@ export class Spine {
   }
 
   /**
+   * Runs for observability surfaces (most recent first). With `status`, only
+   * runs in that state — e.g. `suspended` to find what's awaiting approval.
+   */
+  listRuns(opts: { status?: RunStatus; limit?: number } = {}): Run[] {
+    const limit = opts.limit ?? 50;
+    const rows = (
+      opts.status
+        ? this.db
+            .prepare(`SELECT * FROM runs WHERE status = ? ORDER BY started_at DESC LIMIT ?`)
+            .all(opts.status, limit)
+        : this.db.prepare(`SELECT * FROM runs ORDER BY started_at DESC LIMIT ?`).all(limit)
+    ) as RunRow[];
+    return rows.map(rowToRun);
+  }
+
+  /**
    * Recovery query (reef-docs/04): runs that were mid-flight when the daemon
    * died — status 'running', never reaching a terminal or suspended state.
    * The daemon's recovery pass reconciles these on startup.
