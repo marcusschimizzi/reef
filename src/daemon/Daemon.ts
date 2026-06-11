@@ -327,6 +327,25 @@ export class Daemon {
     return this.spine.getEventsSince(sessionKey, 0);
   }
 
+  /**
+   * Retarget a session to a different model (the TUI `/model`). Validates the id
+   * resolves through the router first — so an unknown/unconfigured provider
+   * fails loudly here, not with a 401 mid-run — then persists it and emits
+   * `session.model.changed` so consumers update live. Applies to the session's
+   * NEXT run; an in-flight run already chose its model at start. Returns an error
+   * message, or null on success.
+   */
+  setSessionModel(sessionKey: string, agentId: string, model: string): string | null {
+    try {
+      this.router.assertResolvable?.(model); // offline check — surfaces unknown/misconfigured providers
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+    this.spine.setSessionModel(sessionKey, agentId, model);
+    this.sink.emit({ type: "session.model.changed", sessionKey, runId: "", model });
+    return null;
+  }
+
   /** Recent runs, optionally filtered by status (most recent first). */
   listRuns(opts: { status?: RunStatus; limit?: number } = {}): Run[] {
     return this.spine.listRuns(opts);

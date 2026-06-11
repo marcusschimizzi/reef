@@ -12,6 +12,8 @@ export type ControlRequest =
   | { kind: "send"; sessionKey: string; agentId?: string; message: string }
   | { kind: "resolve"; approvalId: string; decision: string }
   | { kind: "stop"; sessionKey: string }
+  // retarget a session to a different model (the TUI `/model` picker).
+  | { kind: "set_model"; sessionKey: string; model: string }
   // sessions view (Phase 4c TUI): snapshot the session list, or replay one
   // session's event history to rebuild its transcript on open.
   | { kind: "list_sessions" }
@@ -84,6 +86,11 @@ function handleLine(
     case "stop":
       daemon.cancel(req.sessionKey);
       break;
+    case "set_model": {
+      const error = daemon.setSessionModel(req.sessionKey, defaultAgentId, req.model);
+      if (error) sock.write(`${JSON.stringify({ kind: "error", error })}\n`);
+      break;
+    }
     case "list_sessions":
       sock.write(`${JSON.stringify({ kind: "sessions", sessions: daemon.listSessions() })}\n`);
       break;

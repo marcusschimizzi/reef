@@ -73,6 +73,12 @@ export type ReefEvent = EventEnvelope &
         approvalId: string;
         decision: ApprovalDecision;
       }
+    // ── session control (out-of-run state changes) ──────────────────────────
+    // A session's model was switched (e.g. the TUI `/model`). This is a
+    // session-level setting, not part of any run, so it carries an empty runId.
+    // Consumers fold it to update their view; the session's NEXT run reads the
+    // new model (an in-flight run already chose its model at start).
+    | { type: "session.model.changed"; model: string }
     // ── context management (Phase 3c) ────────────────────────────────────────
     // Emitted when the loop folds older messages into a durable summary to stay
     // under the context window. First-class in the native stream; the conch

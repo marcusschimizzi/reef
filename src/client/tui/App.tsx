@@ -13,6 +13,8 @@ import {
 } from "./components.js";
 import { SessionsView } from "./sessions.js";
 import { ConfigView, type ConfigProvider } from "./configView.js";
+import { ModelPicker } from "./modelPicker.js";
+import { buildModelOptions, normalizeModelId, type ModelOption } from "./models.js";
 import { Connection, type ConnStatus } from "./connection.js";
 import { resolveTheme } from "./theme.js";
 import {
@@ -46,6 +48,7 @@ const COMMANDS: Command[] = [
   { name: "help", description: "show available commands" },
   { name: "stop", description: "cancel the current run" },
   { name: "sessions", description: "back to the sessions list" },
+  { name: "model", description: "switch this session's model" },
   { name: "config", description: "view & edit configuration" },
   { name: "clear", description: "clear the transcript" },
   { name: "quit", description: "exit reef" },
@@ -62,7 +65,7 @@ export interface AppProps {
   session: SessionInfo;
 }
 
-type View = "sessions" | "session" | "config";
+type View = "sessions" | "session" | "config" | "model";
 
 export function App({ socketPath, configPath, session }: AppProps) {
   const { exit } = useApp();
@@ -85,6 +88,12 @@ export function App({ socketPath, configPath, session }: AppProps) {
   const [cfgSel, setCfgSel] = useState(0);
   const [cfgEditing, setCfgEditing] = useState<string | null>(null); // edit buffer, or null
   const [cfgStatus, setCfgStatus] = useState("");
+
+  // Model picker (the `/model` switch over the open session's model).
+  const [modelOpts, setModelOpts] = useState<ModelOption[]>([]);
+  const [modelSel, setModelSel] = useState(0);
+  const [modelEditing, setModelEditing] = useState<string | null>(null); // custom-entry buffer, or null
+  const [modelStatus, setModelStatus] = useState("");
 
   const connRef = useRef<Connection | null>(null);
   // The session whose transcript is open; a ref so the socket handlers (set up
@@ -175,6 +184,44 @@ export function App({ socketPath, configPath, session }: AppProps) {
     setInput("");
     leftPresses.current = 0;
     stdout.write(CLEAR_SCREEN);
+  }
+
+  /** Open the model picker for the current session, sourcing options from the
+   *  config file, the live session index, and the session's current model. */
+  function toModelPicker(): void {
+    const raw = readRawConfig(configPath) ?? {};
+    const current = openKey.current ? index[openKey.current]?.model : undefined;
+    const options = buildModelOptions(raw, index, current);
+    const cur = current ? normalizeModelId(current) : undefined;
+    const at = cur ? options.findIndex((o) => o.id === cur) : -1;
+    setModelOpts(options);
+    setModelSel(at >= 0 ? at : 0);
+    setModelEditing(null);
+    setModelStatus("");
+    setView("model");
+    setInput("");
+    leftPresses.current = 0;
+    stdout.write(CLEAR_SCREEN);
+  }
+
+  /** Return from a transient view (model picker) to the open session, preserving
+   *  its transcript — remount <Static> so the committed lines reprint cleanly. */
+  function backToSession(): void {
+    setView("session");
+    setInput("");
+    leftPresses.current = 0;
+    stdout.write(CLEAR_SCREEN);
+    setGeneration((g) => g + 1);
+  }
+
+  /** Retarget the open session to `model` (validated daemon-side); the change
+   *  echoes back as session.model.changed and updates the header/StatusBar live. */
+  function applyModel(model: string): void {
+    const id = model.trim();
+    if (!id) return backToSession();
+    if (openKey.current) connRef.current?.setModel(openKey.current, id);
+    backToSession();
+    setState((s) => pushNotice(s, `model → ${normalizeModelId(id)} (applies to your next message)`));
   }
 
   // The scalar value (model / policy file) at config-view row 0 / 1.
@@ -282,6 +329,32 @@ export function App({ socketPath, configPath, session }: AppProps) {
     { isActive: view === "config" },
   );
 
+  // Model picker: navigate options, enter to choose (custom row opens inline
+  // text entry), `← ←` cancels back to the session. While editing custom, keys
+  // go to the TextInput (Esc returns to the list).
+  useInput(
+    (_key, k) => {
+      if (modelEditing !== null) {
+        if (k.escape) setModelEditing(null);
+        return; // the TextInput owns typing + submit
+      }
+      if (k.upArrow) setModelSel((s) => Math.max(0, s - 1));
+      else if (k.downArrow) setModelSel((s) => Math.min(modelOpts.length - 1, s + 1));
+      else if (k.return) {
+        const opt = modelOpts[modelSel];
+        if (!opt) return;
+        if (opt.custom) setModelEditing(""); // open free-text entry
+        else applyModel(opt.id);
+      } else if (k.leftArrow) {
+        leftPresses.current += 1;
+        if (leftPresses.current >= 2) backToSession();
+      } else {
+        leftPresses.current = 0;
+      }
+    },
+    { isActive: view === "model" },
+  );
+
   function submit(line: string): void {
     const text = line.trim();
     setInput("");
@@ -293,17 +366,26 @@ export function App({ socketPath, configPath, session }: AppProps) {
     }
     if (!text) return;
     if (text.startsWith("/")) {
-      const typed = text.slice(1).split(/\s+/)[0] ?? "";
-      return command(matches[paletteSel]?.name ?? typed);
+      const parts = text.slice(1).split(/\s+/);
+      const typed = parts[0] ?? "";
+      const arg = parts.slice(1).join(" ").trim();
+      return command(matches[paletteSel]?.name ?? typed, arg);
     }
     if (openKey.current) connRef.current?.send(openKey.current, text); // echoes back
 
   }
 
-  function command(name: string): void {
+  function command(name: string, arg?: string): void {
     switch (name) {
       case "help":
         setState((s) => pushNotice(s, HELP));
+        break;
+      case "model":
+        // only meaningful inside an open session (no-op from the sessions list).
+        if (!openKey.current) break;
+        // `/model <id>` sets directly; bare `/model` opens the picker.
+        if (arg) applyModel(arg);
+        else toModelPicker();
         break;
       case "stop":
         if (openKey.current) connRef.current?.stop(openKey.current);
@@ -344,6 +426,24 @@ export function App({ socketPath, configPath, session }: AppProps) {
           onEditChange={setCfgEditing}
           onEditSubmit={submitConfigEdit}
           status={cfgStatus}
+        />
+      </Box>
+    );
+  }
+
+  if (view === "model") {
+    const cur = openKey.current ? index[openKey.current]?.model : undefined;
+    return (
+      <Box flexDirection="column">
+        <ModelPicker
+          theme={theme}
+          options={modelOpts}
+          selected={modelSel}
+          current={cur ? normalizeModelId(cur) : undefined}
+          editing={modelEditing}
+          onEditChange={setModelEditing}
+          onEditSubmit={() => applyModel(modelEditing ?? "")}
+          status={modelStatus}
         />
       </Box>
     );

@@ -84,6 +84,9 @@ export class Connection {
   stop(sessionKey: string): void {
     this.write({ kind: "stop", sessionKey });
   }
+  setModel(sessionKey: string, model: string): void {
+    this.write({ kind: "set_model", sessionKey, model });
+  }
   listSessions(): void {
     this.write({ kind: "list_sessions" });
   }

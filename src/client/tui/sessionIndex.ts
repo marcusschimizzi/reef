@@ -45,6 +45,9 @@ export function indexEvent(index: SessionIndex, event: ReefEvent): SessionIndex 
         status: "working",
         lastActivityAt: at,
       });
+    case "session.model.changed":
+      // a `/model` switch — reflect the new model in the list/header immediately
+      return put(index, { ...prev, model: event.model });
     case "run.resumed":
       return put(index, { ...prev, status: "working", lastActivityAt: at });
     case "run.suspended":

@@ -192,6 +192,14 @@ export class Spine {
       .run(sessionKey, agentId, model ?? null, nowIso());
   }
 
+  /** Change a session's model (the TUI `/model`); the session's next run reads
+   *  it. Creates the session row if it doesn't exist yet, so a brand-new chat
+   *  can be retargeted before its first turn. */
+  setSessionModel(sessionKey: string, agentId: string, model: string): void {
+    this.ensureSession(sessionKey, agentId, model); // create-if-missing (no-op if present)
+    this.db.prepare(`UPDATE sessions SET model = ? WHERE session_key = ?`).run(model, sessionKey);
+  }
+
   /** The model snapshotted for this session, if any (else the agent default applies). */
   getSessionModel(sessionKey: string): string | undefined {
     const row = this.db

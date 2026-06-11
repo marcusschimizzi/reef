@@ -50,6 +50,10 @@ export interface ModelTurn {
 /** The seam the loop calls. Implementations map to/from a concrete provider. */
 export interface ModelRouter {
   generateTurn(input: ModelTurnInput): Promise<ModelTurn>;
+  /** Validate that a model id resolves (its provider is known/configured),
+   *  throwing otherwise. Optional so test doubles need not implement it; used by
+   *  `/model` to reject an unknown provider before it becomes a mid-run 401. */
+  assertResolvable?(modelId: string): void;
 }
 
 export class VercelRouter implements ModelRouter {
@@ -59,6 +63,12 @@ export class VercelRouter implements ModelRouter {
    *  (the primary source for API keys) to extend the built-ins. */
   constructor(providers: ProviderConfig[] = [], secrets?: SecretStore) {
     this.registry = new ProviderRegistry(providers, secrets);
+  }
+
+  /** Build (and cache) the provider for `modelId`, throwing if its provider is
+   *  unknown or misconfigured — purely offline, no network call. */
+  assertResolvable(modelId: string): void {
+    this.registry.resolve(modelId);
   }
 
   async generateTurn(input: ModelTurnInput): Promise<ModelTurn> {

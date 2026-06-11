@@ -41,6 +41,12 @@ describe("sessionIndex", () => {
     expect(idx.s1).toMatchObject({ status: "failed", preview: "boom" });
   });
 
+  it("folds a /model switch into the session's model immediately", () => {
+    let idx = seedSessions(emptyIndex, [summary({ sessionKey: "s1", model: "anthropic/claude-opus-4-8" })]);
+    idx = indexEvent(idx, ev({ type: "session.model.changed", sessionKey: "s1", model: "openai/gpt-4o" }));
+    expect(idx.s1?.model).toBe("openai/gpt-4o");
+  });
+
   it("tracks pending approvals and the oldest pending id", () => {
     let idx = seedSessions(emptyIndex, [summary({ sessionKey: "s1" })]);
     idx = indexEvent(idx, ev({ type: "approval.requested", sessionKey: "s1", approvalId: "a1", action: "shell(...)" }));
