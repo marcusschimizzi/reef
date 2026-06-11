@@ -69,6 +69,17 @@ to plain commands and matches on parsed argv prefixes, so `git push`, `rm`, and
 anything chained/redirected still gate. A missing or invalid config falls back to
 the default — a broken config never grants authority.
 
+### Proactive approval routing
+
+A proactive run (trigger/heartbeat) has no human attached to its session, so a
+gated tool can't be approved live. By default (`proactiveApproval: "deny"`) it's
+auto-denied and the run continues. Set `proactiveApproval: "route"` and configure
+`surfaces` (desktop notification, webhook → Slack/ntfy/custom) and reef instead
+**suspends and notifies you** to approve in your UI (TUI/conch/`POST
+/v1/approvals/:id/resolve`); an unanswered request auto-denies after
+`proactiveApprovalTimeoutSeconds` (default 3600), so it never hangs. Put a secret
+webhook URL in an env var named by `urlEnv`, not in the file.
+
 ## Develop
 
 ```

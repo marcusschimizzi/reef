@@ -26,22 +26,25 @@ const ruleSchema = z.object({
 const configSchema = z.object({ rules: z.array(ruleSchema) });
 
 /**
- * Build the approval policy from a config file path. Returns DefaultPolicy when
- * the path is unset/missing or the file fails to parse/validate (logging why),
- * so authority is never granted by a malformed config.
+ * Build the approval policy from a config file path. The `fallback` is used when
+ * no rule matches, and is also returned wholesale when the path is unset/missing
+ * or the file fails to parse/validate (logging why) — so authority is never
+ * granted by a malformed config. The caller passes a DefaultPolicy configured for
+ * the proactive-approval mode (deny vs route).
  */
 export function loadPolicy(
   path: string | undefined,
   log: (message: string) => void = () => {},
+  fallback: ApprovalPolicy = new DefaultPolicy(),
 ): ApprovalPolicy {
-  if (!path || !existsSync(path)) return new DefaultPolicy();
+  if (!path || !existsSync(path)) return fallback;
   try {
     const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
     const config = configSchema.parse(raw);
     log(`approval policy loaded from ${path} (${config.rules.length} rule(s))`);
-    return new ConfigurablePolicy(config.rules as PolicyRule[], new DefaultPolicy());
+    return new ConfigurablePolicy(config.rules as PolicyRule[], fallback);
   } catch (err) {
-    log(`approval policy at ${path} is invalid — falling back to DefaultPolicy: ${String(err)}`);
-    return new DefaultPolicy();
+    log(`approval policy at ${path} is invalid — falling back to default: ${String(err)}`);
+    return fallback;
   }
 }

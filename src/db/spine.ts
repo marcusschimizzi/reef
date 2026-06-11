@@ -102,6 +102,7 @@ interface ApprovalRow {
   decision: string | null;
   created_at: string;
   decided_at: string | null;
+  expires_at: string | null;
 }
 
 interface ActionRow {
@@ -544,6 +545,22 @@ export class Spine {
     return c;
   }
 
+  /** Arm an auto-deny deadline on a (routed proactive) approval. */
+  setApprovalExpiry(id: string, expiresAt: string): void {
+    this.db.prepare(`UPDATE approvals SET expires_at = ? WHERE id = ?`).run(expiresAt, id);
+  }
+
+  /** Pending approvals whose auto-deny deadline has passed — swept to denied. */
+  getExpiredApprovals(nowIso: string): Approval[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM approvals
+         WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ?`,
+      )
+      .all(nowIso) as ApprovalRow[];
+    return rows.map(rowToApproval);
+  }
+
   // ── triggers (durable wake sources — Phase 4a) ──────────────────────────────
   createTrigger(t: Trigger): void {
     this.db
@@ -770,6 +787,7 @@ function rowToApproval(row: ApprovalRow): Approval {
     decision: row.decision ?? undefined,
     createdAt: row.created_at,
     decidedAt: row.decided_at ?? undefined,
+    expiresAt: row.expires_at ?? undefined,
   };
 }
 

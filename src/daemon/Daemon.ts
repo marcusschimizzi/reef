@@ -29,6 +29,7 @@ import { Scheduler, DEFAULT_TICK_MS } from "./Scheduler.js";
 import { VercelRouter, type ModelRouter } from "../model/router.js";
 import type { MemoryStore } from "../memory/seam.js";
 import type { ReefEvent } from "../protocol/events.js";
+import type { ApprovalNotification, Surface } from "../surfaces/index.js";
 import { SqliteMemory } from "../memory/sqlite.js";
 import { builtinTools } from "../tools/builtins.js";
 import { fileTools } from "../tools/files.js";
@@ -58,6 +59,10 @@ export interface DaemonOptions {
   gate?: ProactiveGate;
   /** Approval policy for tool calls; defaults to the behavior-preserving DefaultPolicy. */
   policy?: ApprovalPolicy;
+  /** Outbound surfaces for routing proactive approval requests (Phase: approval-routing). */
+  surfaces?: Surface[];
+  /** Seconds before a routed proactive approval auto-denies (default 3600). */
+  proactiveApprovalTimeoutSeconds?: number;
 }
 
 /** Default self-maintenance instruction for a heartbeat trigger (Phase 4b). */
@@ -107,6 +112,10 @@ export class Daemon {
   private readonly scheduler: Scheduler;
   private readonly gate: ProactiveGate;
   private readonly policy: ApprovalPolicy;
+  private readonly surfaces: Surface[];
+  private readonly approvalTimeoutMs: number;
+  /** Per-run metadata captured from run.started, for routing decisions. */
+  private readonly runMeta = new Map<string, { proactive: boolean; agentId: string }>();
   /** Abort handles for in-flight runs, keyed by session — powers cancellation. */
   private readonly aborters = new Map<string, AbortController>();
 
@@ -116,9 +125,11 @@ export class Daemon {
     this.router = opts.router ?? new VercelRouter();
     this.workspaceDir = opts.workspaceDir;
     this.maxSteps = opts.maxSteps ?? 20;
-    this.scheduler = new Scheduler(() => this.tickTriggers(), opts.tickMs ?? DEFAULT_TICK_MS);
+    this.scheduler = new Scheduler(() => this.tick(), opts.tickMs ?? DEFAULT_TICK_MS);
     this.gate = opts.gate ?? new DefaultGate();
     this.policy = opts.policy ?? new DefaultPolicy();
+    this.surfaces = opts.surfaces ?? [];
+    this.approvalTimeoutMs = (opts.proactiveApprovalTimeoutSeconds ?? 3600) * 1000;
     // Default memory: the SQLite/FTS5 store sharing the spine's connection,
     // scoped per agent so agents never see each other's memory.
     this.memoryFactory =
@@ -135,6 +146,60 @@ export class Daemon {
       this.tools.register(tool);
     }
     this.inbox = new Inbox<Job>((job) => this.processJob(job));
+    // Watch our own event stream to route proactive approval requests out to
+    // surfaces (and arm their auto-deny deadline). Inert unless a proactive run
+    // actually suspends for approval — which only happens when routing is on.
+    this.sink.subscribe((event) => this.onSinkEvent(event));
+  }
+
+  // ── proactive approval routing ──────────────────────────────────────────────
+  private onSinkEvent(event: ReefEvent): void {
+    if (event.type === "run.started") {
+      this.runMeta.set(event.runId, {
+        proactive: event.source?.kind === "trigger",
+        agentId: event.agentId,
+      });
+    } else if (event.type === "run.completed" || event.type === "run.failed") {
+      this.runMeta.delete(event.runId);
+    } else if (event.type === "approval.requested") {
+      const meta = this.runMeta.get(event.runId);
+      if (meta?.proactive) this.routeApproval(event, meta.agentId);
+    }
+  }
+
+  /** Arm the auto-deny deadline and fan the request out to surfaces (best-effort). */
+  private routeApproval(
+    event: Extract<ReefEvent, { type: "approval.requested" }>,
+    agentId: string,
+  ): void {
+    this.spine.setApprovalExpiry(
+      event.approvalId,
+      new Date(Date.now() + this.approvalTimeoutMs).toISOString(),
+    );
+    const note: ApprovalNotification = {
+      kind: "approval",
+      approvalId: event.approvalId,
+      runId: event.runId,
+      sessionKey: event.sessionKey,
+      agentId,
+      action: event.action,
+      detail: event.detail,
+    };
+    for (const surface of this.surfaces) void surface.notify(note);
+  }
+
+  /** Auto-deny routed proactive approvals whose deadline has passed (no one
+   *  answered) — the run then resumes and completes rather than hanging. */
+  sweepExpiredApprovals(now: Date = new Date()): void {
+    for (const approval of this.spine.getExpiredApprovals(now.toISOString())) {
+      this.resolveApproval(approval.id, "deny");
+    }
+  }
+
+  /** The scheduler's periodic work: fire due triggers, then expire stale approvals. */
+  private async tick(): Promise<void> {
+    await this.tickTriggers();
+    this.sweepExpiredApprovals();
   }
 
   /** The agent's memory store, built on first use and cached for reuse. */

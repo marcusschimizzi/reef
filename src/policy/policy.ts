@@ -38,19 +38,38 @@ export const PROACTIVE_DENY_REASON =
   "Approval required, but this run was started by a trigger with no human " +
   "available to approve it — treated as denied. Continue without this tool.";
 
+export interface DefaultPolicyOptions {
+  /**
+   * What a gated tool does in a proactive (trigger) run with no human attached:
+   * "deny" (the safe default — auto-deny, the run continues) or "gate" (suspend
+   * and route an approval request to a surface; set when approval-routing is on).
+   */
+  proactiveGatedAction?: "deny" | "gate";
+}
+
 /**
- * The default policy — reproduces reef's built-in behavior exactly, now
- * expressed as data rather than scattered loop branches:
+ * The default policy — reproduces reef's built-in behavior, expressed as data:
  *   • an ungated tool always runs;
  *   • a gated tool in an interactive run suspends for human approval;
- *   • a gated tool in a proactive (trigger) run is denied — there is no human
- *     on that session to approve it (folds in the old hard-coded auto-deny).
+ *   • a gated tool in a proactive run is denied by default (no human to approve)
+ *     — or, with `proactiveGatedAction: "gate"`, suspends so the daemon can route
+ *     an approval request out to a configured surface.
  * A user-configurable policy wraps or replaces this; it is the floor.
  */
 export class DefaultPolicy implements ApprovalPolicy {
+  private readonly proactiveGated: "deny" | "gate";
+
+  constructor(opts: DefaultPolicyOptions = {}) {
+    this.proactiveGated = opts.proactiveGatedAction ?? "deny";
+  }
+
   decide(ctx: PolicyContext): PolicyDecision {
     if (!ctx.needsApproval) return ALLOW;
-    if (ctx.source.kind === "trigger") return { action: "deny", reason: PROACTIVE_DENY_REASON };
+    if (ctx.source.kind === "trigger") {
+      return this.proactiveGated === "gate"
+        ? { action: "gate" }
+        : { action: "deny", reason: PROACTIVE_DENY_REASON };
+    }
     return { action: "gate" };
   }
 }

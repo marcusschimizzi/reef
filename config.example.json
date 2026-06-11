@@ -5,6 +5,18 @@
 
   "policyFile": ".reef/policy.json",
 
+  "$comment_approval": "Proactive runs (triggers/heartbeat) have no human watching. proactiveApproval 'deny' (default) auto-denies a gated tool and continues; 'route' instead suspends and notifies the surfaces below so you can approve in your reef UI, auto-denying after proactiveApprovalTimeoutSeconds (default 3600) if unanswered.",
+  "proactiveApproval": "route",
+  "proactiveApprovalTimeoutSeconds": 3600,
+  "surfaces": [
+    { "kind": "desktop" },
+    {
+      "$comment": "Slack/Discord/ntfy/custom incoming webhook. Put a secret URL in an env var via urlEnv instead of url.",
+      "kind": "webhook",
+      "urlEnv": "REEF_WEBHOOK_URL"
+    }
+  ],
+
   "providers": [
     {
       "$comment": "Z.ai general API (OpenAI-compatible). Models: glm-4.6, glm-4.7, glm-5.1. Set ZAI_API_KEY. e.g. zai/glm-4.6",

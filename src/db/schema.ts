@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS approvals (
   decision    TEXT,
   created_at  TEXT NOT NULL,
   decided_at  TEXT,
+  expires_at  TEXT,              -- routed proactive approvals auto-deny past this
   FOREIGN KEY (run_id) REFERENCES runs(id)
 );
 CREATE INDEX IF NOT EXISTS idx_approvals_run ON approvals(run_id);
@@ -163,6 +164,7 @@ export function applySchema(db: Database): void {
  */
 function migrate(db: Database): void {
   addColumnIfMissing(db, "triggers", "created_by", "TEXT NOT NULL DEFAULT 'operator'");
+  addColumnIfMissing(db, "approvals", "expires_at", "TEXT");
 }
 
 function addColumnIfMissing(

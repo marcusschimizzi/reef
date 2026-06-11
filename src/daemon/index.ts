@@ -8,6 +8,8 @@ import { Daemon } from "./Daemon.js";
 import { attachRunLogger } from "./log.js";
 import { loadConfig } from "../config/config.js";
 import { loadPolicy } from "../policy/config.js";
+import { DefaultPolicy } from "../policy/policy.js";
+import { buildSurfaces } from "../surfaces/index.js";
 import { VercelRouter } from "../model/router.js";
 import { startSocketServer } from "./socket.js";
 
@@ -68,11 +70,19 @@ const DEFAULT_AGENT: AgentRecord = {
   ],
 };
 
+// Proactive runs route approvals out to surfaces only when configured to; the
+// policy's proactive-gated action follows that, and surfaces are the channels.
+const routeApprovals = config.proactiveApproval === "route";
+const surfaces = buildSurfaces(config.surfaces, log);
+const fallbackPolicy = new DefaultPolicy({ proactiveGatedAction: routeApprovals ? "gate" : "deny" });
+
 const daemon = new Daemon({
   dbPath: join(STATE_DIR, "reef.db"),
   workspaceDir: join(STATE_DIR, "workspaces"),
   router: new VercelRouter(config.providers), // built-ins + any custom config providers
-  policy: loadPolicy(POLICY_FILE, log),
+  policy: loadPolicy(POLICY_FILE, log, fallbackPolicy),
+  surfaces,
+  proactiveApprovalTimeoutSeconds: config.proactiveApprovalTimeoutSeconds,
 });
 daemon.registerAgent(DEFAULT_AGENT);
 

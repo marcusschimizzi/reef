@@ -110,6 +110,8 @@ export interface Approval {
   decision?: string;
   createdAt: string;
   decidedAt?: string;
+  /** Auto-deny deadline for a routed proactive approval (absent = no expiry). */
+  expiresAt?: string;
 }
 
 /**
