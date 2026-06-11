@@ -42,6 +42,16 @@ provider names the env var its key comes from (`apiKeyEnv`). An env var override
 the matching config key (`REEF_MODEL`, `REEF_POLICY_FILE`), so the precedence is
 env → config → built-in default.
 
+Edit it with the `config` CLI (every change is validated before writing; restart
+the daemon to apply):
+
+```
+npm run config -- show
+npm run config -- set defaultModel ollama/llama3.1
+npm run config -- provider add zai openai-compatible --base-url <url> --api-key-env ZAI_API_KEY
+npm run config -- provider rm zai
+```
+
 ## Approval policy
 
 Whether a tool call runs, asks for approval, or is refused is decided by an

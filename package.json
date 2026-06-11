@@ -13,6 +13,7 @@
     "daemon": "tsx src/daemon/index.ts",
     "cli": "tsx src/client/cli.tsx",
     "tui": "tsx src/client/cli.tsx",
+    "config": "tsx src/client/config.ts",
     "test": "vitest run"
   },
   "dependencies": {

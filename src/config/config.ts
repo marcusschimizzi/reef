@@ -35,6 +35,66 @@ export interface ReefConfig {
 
 const EMPTY: ReefConfig = { providers: [] };
 
+/** Validate + normalize a raw config object (throws on a schema violation). */
+export function parseConfig(raw: unknown): ReefConfig {
+  const parsed = configSchema.parse(raw);
+  return {
+    defaultModel: parsed.defaultModel,
+    providers: parsed.providers ?? [],
+    policyFile: parsed.policyFile,
+  };
+}
+
+/** A scalar config key the CLI can set directly. */
+export type ScalarKey = "defaultModel" | "policyFile";
+
+/** A single edit the `reef config` CLI applies to the raw config object. */
+export type ConfigEdit =
+  | { op: "set"; key: ScalarKey; value: string }
+  | { op: "unset"; key: ScalarKey }
+  | { op: "provider-set"; provider: { id: string; kind: string; baseURL?: string; apiKeyEnv?: string } }
+  | { op: "provider-rm"; id: string };
+
+/**
+ * Apply an edit to the RAW config object (not the parsed view) so unknown keys
+ * a newer reef might use are preserved, then validate the result — throwing if
+ * the edit would make the config invalid, so the CLI never writes a file the
+ * daemon would reject. Pure: returns a new object, mutates nothing.
+ */
+export function applyConfigEdit(
+  raw: Record<string, unknown>,
+  edit: ConfigEdit,
+): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...raw };
+  const providerList = (): Array<Record<string, unknown>> =>
+    Array.isArray(next.providers) ? [...(next.providers as Array<Record<string, unknown>>)] : [];
+  const idOf = (p: Record<string, unknown>): unknown => p?.id;
+
+  switch (edit.op) {
+    case "set":
+      next[edit.key] = edit.value;
+      break;
+    case "unset":
+      delete next[edit.key];
+      break;
+    case "provider-set": {
+      const providers = providerList();
+      const i = providers.findIndex((p) => idOf(p) === edit.provider.id);
+      // drop undefined optionals so we don't write null/empty keys
+      const entry = Object.fromEntries(Object.entries(edit.provider).filter(([, v]) => v !== undefined));
+      if (i >= 0) providers[i] = entry;
+      else providers.push(entry);
+      next.providers = providers;
+      break;
+    }
+    case "provider-rm":
+      next.providers = providerList().filter((p) => idOf(p) !== edit.id);
+      break;
+  }
+  parseConfig(next); // throws if the edit produced an invalid config
+  return next;
+}
+
 /**
  * Load config from a JSON file. Returns safe defaults (no providers, no
  * overrides) when the path is unset/missing or the file fails to parse/validate,
@@ -48,12 +108,7 @@ export function loadConfig(
   if (!path || !existsSync(path)) return EMPTY;
   try {
     const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
-    const parsed = configSchema.parse(raw);
-    const config: ReefConfig = {
-      defaultModel: parsed.defaultModel,
-      providers: parsed.providers ?? [],
-      policyFile: parsed.policyFile,
-    };
+    const config = parseConfig(raw);
     log(
       `config loaded from ${path}` +
         (config.providers.length ? ` (${config.providers.length} custom provider(s))` : ""),
