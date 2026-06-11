@@ -128,6 +128,27 @@ describe("Daemon", () => {
     daemon.close();
   });
 
+  it("pins a session's model: changing the global default doesn't move existing sessions", async () => {
+    const dir = tempDir();
+    const models: string[] = [];
+    const router: ModelRouter = {
+      async generateTurn(input) {
+        models.push(input.model);
+        return { stop: "completed", content: [{ type: "text", text: "ok" }], usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+    };
+    const daemon = new Daemon({ dbPath: join(dir, "reef.db"), workspaceDir: join(dir, "ws"), router });
+    daemon.registerAgent({ ...agent, model: "model-a" });
+
+    await daemon.submit({ sessionKey: "s1", agentId: "reef", message: "hi" }); // snapshots model-a
+    daemon.registerAgent({ ...agent, model: "model-b" }); // global default changes
+    await daemon.submit({ sessionKey: "s1", agentId: "reef", message: "again" }); // s1 stays model-a
+    await daemon.submit({ sessionKey: "s2", agentId: "reef", message: "new" }); // s2 gets model-b
+
+    expect(models).toEqual(["model-a", "model-a", "model-b"]);
+    daemon.close();
+  });
+
   it("surfaces runs awaiting approval for observability", async () => {
     const dir = tempDir();
     const gatedAgent: AgentRecord = { ...agent, toolAllowlist: ["shell"] };

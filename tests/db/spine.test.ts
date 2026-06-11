@@ -121,6 +121,16 @@ describe("Spine", () => {
     spine.close();
   });
 
+  it("snapshots a session's model at creation and keeps it (sticky)", () => {
+    const spine = new Spine(tempDbPath());
+    spine.upsertAgent(agent);
+    spine.ensureSession("s1", agent.id, "model-x");
+    spine.ensureSession("s1", agent.id, "model-y"); // OR IGNORE — original sticks
+    expect(spine.getSessionModel("s1")).toBe("model-x");
+    expect(spine.listSessions().find((s) => s.sessionKey === "s1")?.model).toBe("model-x");
+    spine.close();
+  });
+
   it("summarizes sessions for the sessions view (title, preview, status, approvals)", () => {
     const spine = new Spine(tempDbPath());
     spine.upsertAgent(agent);

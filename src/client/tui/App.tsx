@@ -383,7 +383,9 @@ export function App({ socketPath, configPath, session }: AppProps) {
 
   // session view — the transcript, the live tail, and the input/approval region
   const { done, live } = splitTranscript(state.items);
-  const title = openKey.current ? index[openKey.current]?.title ?? openKey.current : "";
+  const openSummary = openKey.current ? index[openKey.current] : undefined;
+  const title = openSummary?.title ?? openKey.current ?? "";
+  const openModel = openSummary?.model;
   const staticEntries: Array<{ key: string; item?: TranscriptState["items"][number] }> = [
     { key: "header" },
     ...done.map((item) => ({ key: `i${item.id}`, item })),
@@ -401,6 +403,7 @@ export function App({ socketPath, configPath, session }: AppProps) {
             <Box key={entry.key} marginBottom={1}>
               <Text color={theme.primary}>reef </Text>
               <Text color={theme.muted}>· {title}  </Text>
+              {openModel ? <Text color={theme.secondary}>{openModel}  </Text> : null}
               <Text color={theme.muted}>(← ← back to sessions)</Text>
             </Box>
           )
@@ -421,7 +424,7 @@ export function App({ socketPath, configPath, session }: AppProps) {
             <TextInput value={input} onChange={setInput} onSubmit={submit} placeholder="ask reef…" />
           </Box>
         )}
-        <StatusBar theme={theme} status={state.status} usage={state.usage} agentId={session.agentId} />
+        <StatusBar theme={theme} status={state.status} usage={state.usage} agentId={session.agentId} model={openModel} />
       </Box>
     </Box>
   );

@@ -68,6 +68,7 @@ const DEFAULT_AGENT: AgentRecord = {
     "list_runs",
     "list_sessions",
     "list_triggers",
+    "current_model",
   ],
 };
 

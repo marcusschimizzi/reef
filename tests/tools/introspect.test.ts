@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  currentModelTool,
   listRunsTool,
   listSessionsTool,
   listTriggersTool,
@@ -49,5 +50,11 @@ describe("introspection tools", () => {
 
   it("throws without an introspection capability (loop reports it back)", async () => {
     await expect(listRunsTool.run({}, ctx())).rejects.toThrow(/without an introspection/);
+  });
+
+  it("current_model reports the run's effective model from context", async () => {
+    const withModel = { fs: null as never, workspaceRoot: "/tmp", model: "ollama/llama3.1" } as ToolContext;
+    expect(await currentModelTool.run({}, withModel)).toEqual({ model: "ollama/llama3.1" });
+    expect(await currentModelTool.run({}, ctx())).toEqual({ model: "(unknown)" });
   });
 });

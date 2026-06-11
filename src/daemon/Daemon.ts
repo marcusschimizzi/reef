@@ -431,7 +431,8 @@ export class Daemon {
   }
 
   private async processWake(wake: Wake): Promise<void> {
-    this.spine.ensureSession(wake.sessionKey, wake.agentId);
+    // Snapshot the current default model onto a new session so it sticks.
+    this.spine.ensureSession(wake.sessionKey, wake.agentId, this.spine.getAgent(wake.agentId)?.model);
     this.spine.appendMessage(wake.sessionKey, "user", [
       { type: "text", text: wake.message },
     ]);
@@ -454,7 +455,11 @@ export class Daemon {
   private async processTrigger(triggerId: string): Promise<void> {
     const trigger = this.spine.getTrigger(triggerId);
     if (!trigger || !trigger.enabled) return;
-    this.spine.ensureSession(trigger.sessionKey, trigger.agentId);
+    this.spine.ensureSession(
+      trigger.sessionKey,
+      trigger.agentId,
+      this.spine.getAgent(trigger.agentId)?.model,
+    );
     this.spine.appendMessage(trigger.sessionKey, "user", [
       { type: "text", text: trigger.input },
     ]);
@@ -494,6 +499,10 @@ export class Daemon {
       });
       return;
     }
+    // The session's pinned model (snapshot at creation) overrides the agent
+    // default, so a session keeps its model across global config changes.
+    const model = this.spine.getSessionModel(run.sessionKey) ?? agent.model;
+    const agentForRun = model === agent.model ? agent : { ...agent, model };
     const root = join(this.workspaceDir, agent.id);
     await mkdir(root, { recursive: true });
     const aborter = new AbortController();
@@ -501,7 +510,7 @@ export class Daemon {
     try {
       await runAgentLoop(
         run,
-        agent,
+        agentForRun,
         {
           spine: this.spine,
           router: this.router,
@@ -510,6 +519,7 @@ export class Daemon {
           toolContext: {
             fs: new BoundFs(root),
             workspaceRoot: root,
+            model,
             memory: this.memoryFor(agent.id),
             scheduler: new DaemonScheduler(this.spine, agent.id),
             introspection: new DaemonIntrospection(this.spine, agent.id),

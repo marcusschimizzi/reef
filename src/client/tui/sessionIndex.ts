@@ -38,7 +38,13 @@ export function indexEvent(index: SessionIndex, event: ReefEvent): SessionIndex 
         lastActivityAt: at,
       });
     case "run.started":
-      return put(index, { ...prev, agentId: event.agentId, status: "working", lastActivityAt: at });
+      return put(index, {
+        ...prev,
+        agentId: event.agentId,
+        model: event.model ?? prev.model,
+        status: "working",
+        lastActivityAt: at,
+      });
     case "run.resumed":
       return put(index, { ...prev, status: "working", lastActivityAt: at });
     case "run.suspended":

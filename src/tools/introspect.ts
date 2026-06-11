@@ -63,6 +63,17 @@ export const listSessionsTool: Tool<Record<string, never>> = {
   },
 };
 
+export const currentModelTool: Tool<Record<string, never>> = {
+  name: "current_model",
+  description:
+    "Report which model you (this run) are using — useful if you need to know your " +
+    "own capabilities or tell the user. The model is pinned per session.",
+  inputSchema: z.object({}),
+  async run(_input, ctx) {
+    return { model: ctx.model ?? "(unknown)" };
+  },
+};
+
 export const listTriggersTool: Tool<Record<string, never>> = {
   name: "list_triggers",
   description:
@@ -87,4 +98,9 @@ export const listTriggersTool: Tool<Record<string, never>> = {
   },
 };
 
-export const introspectTools: Tool[] = [listRunsTool, listSessionsTool, listTriggersTool];
+export const introspectTools: Tool[] = [
+  listRunsTool,
+  listSessionsTool,
+  listTriggersTool,
+  currentModelTool,
+];

@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS agents (
 CREATE TABLE IF NOT EXISTS sessions (
   session_key TEXT PRIMARY KEY,
   agent_id    TEXT NOT NULL,
+  model       TEXT,              -- snapshot at creation; sticks across global changes
   created_at  TEXT NOT NULL,
   FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
@@ -165,6 +166,7 @@ export function applySchema(db: Database): void {
 function migrate(db: Database): void {
   addColumnIfMissing(db, "triggers", "created_by", "TEXT NOT NULL DEFAULT 'operator'");
   addColumnIfMissing(db, "approvals", "expires_at", "TEXT");
+  addColumnIfMissing(db, "sessions", "model", "TEXT");
 }
 
 function addColumnIfMissing(

@@ -81,7 +81,7 @@ export async function runAgentLoop(
   emit(
     options.resumeApproval
       ? { type: "run.resumed" }
-      : { type: "run.started", agentId: agent.id, source: options.source },
+      : { type: "run.started", agentId: agent.id, model: agent.model, source: options.source },
   );
 
   const modelTools = tools.modelTools(agent.toolAllowlist);

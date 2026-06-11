@@ -53,6 +53,12 @@ describe("sessionIndex", () => {
     expect(idx.s1).toMatchObject({ pendingApprovals: 0, pendingApprovalId: undefined });
   });
 
+  it("captures the model from run.started", () => {
+    let idx = seedSessions(emptyIndex, [summary({ sessionKey: "s1" })]);
+    idx = indexEvent(idx, ev({ type: "run.started", sessionKey: "s1", agentId: "reef", model: "ollama/llama3.1" }));
+    expect(idx.s1?.model).toBe("ollama/llama3.1");
+  });
+
   it("updates the preview from a completed assistant message", () => {
     let idx = seedSessions(emptyIndex, [summary({ sessionKey: "s1", preview: "old" })]);
     idx = indexEvent(idx, ev({ type: "message.completed", sessionKey: "s1", content: [{ type: "text", text: "the latest reply" }] }));

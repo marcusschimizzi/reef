@@ -442,11 +442,13 @@ export function StatusBar({
   status,
   usage,
   agentId,
+  model,
 }: {
   theme: Theme;
   status: RunStatus;
   usage: UsageTotals;
   agentId: string;
+  model?: string;
 }) {
   return (
     <Box justifyContent="space-between">
@@ -460,7 +462,7 @@ export function StatusBar({
         )}
       </Box>
       <Text color={theme.muted}>
-        ↑{usage.inputTokens} ↓{usage.outputTokens} · {agentId}
+        ↑{usage.inputTokens} ↓{usage.outputTokens} · {model || agentId}
       </Text>
     </Box>
   );

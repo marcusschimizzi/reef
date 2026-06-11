@@ -181,13 +181,23 @@ export class Spine {
   }
 
   // ── sessions ──────────────────────────────────────────────────────────────
-  ensureSession(sessionKey: string, agentId: string): void {
+  /** Create the session if new, snapshotting `model` so it sticks for this
+   *  session's lifetime even if the global default changes later. */
+  ensureSession(sessionKey: string, agentId: string, model?: string): void {
     this.db
       .prepare(
-        `INSERT OR IGNORE INTO sessions (session_key, agent_id, created_at)
-         VALUES (?, ?, ?)`,
+        `INSERT OR IGNORE INTO sessions (session_key, agent_id, model, created_at)
+         VALUES (?, ?, ?, ?)`,
       )
-      .run(sessionKey, agentId, nowIso());
+      .run(sessionKey, agentId, model ?? null, nowIso());
+  }
+
+  /** The model snapshotted for this session, if any (else the agent default applies). */
+  getSessionModel(sessionKey: string): string | undefined {
+    const row = this.db
+      .prepare(`SELECT model FROM sessions WHERE session_key = ?`)
+      .get(sessionKey) as { model: string | null } | undefined;
+    return row?.model ?? undefined;
   }
 
   /**
@@ -198,16 +208,17 @@ export class Spine {
    */
   listSessions(): SessionSummary[] {
     const rows = this.db
-      .prepare(`SELECT session_key, agent_id, created_at FROM sessions`)
-      .all() as Array<{ session_key: string; agent_id: string; created_at: string }>;
+      .prepare(`SELECT session_key, agent_id, model, created_at FROM sessions`)
+      .all() as Array<{ session_key: string; agent_id: string; model: string | null; created_at: string }>;
     return rows
-      .map((r) => this.summarizeSession(r.session_key, r.agent_id, r.created_at))
+      .map((r) => this.summarizeSession(r.session_key, r.agent_id, r.model ?? undefined, r.created_at))
       .sort((a, b) => (a.lastActivityAt < b.lastActivityAt ? 1 : -1));
   }
 
   private summarizeSession(
     sessionKey: string,
     agentId: string,
+    model: string | undefined,
     createdAt: string,
   ): SessionSummary {
     const latestRun = this.db
@@ -239,6 +250,7 @@ export class Spine {
       preview: previewText || sessionStatusNote(status),
       pendingApprovals: p,
       pendingApprovalId: oldestPending?.id,
+      model,
       lastActivityAt: m ?? createdAt,
       createdAt,
     };

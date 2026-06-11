@@ -221,6 +221,8 @@ export interface SessionSummary {
   pendingApprovals: number;
   /** The oldest pending approval's id, if any — lets the list approve in place. */
   pendingApprovalId?: string;
+  /** The model this session is pinned to (snapshot at creation), if set. */
+  model?: string;
   /** ISO-8601 of the most recent activity (last message, else session creation). */
   lastActivityAt: string;
   createdAt: string;

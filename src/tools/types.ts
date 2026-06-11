@@ -11,6 +11,8 @@ export interface ToolContext {
   fs: FsCapability;
   /** Absolute path of the agent's workspace — the default cwd for shell. */
   workspaceRoot: string;
+  /** The effective model id for this run (session pin, else agent default). */
+  model?: string;
   /** The agent's bound memory store. Present whenever the daemon runs a tool;
    *  optional so lightweight/no-memory execution contexts (and tool tests that
    *  don't touch memory) need not supply one. Memory tools assert it. */

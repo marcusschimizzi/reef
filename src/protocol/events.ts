@@ -34,7 +34,7 @@ export interface EventEnvelope {
 export type ReefEvent = EventEnvelope &
   (
     // ── run & step lifecycle ───────────────────────────────────────────────
-    | { type: "run.started"; agentId: string; source?: RunSource }
+    | { type: "run.started"; agentId: string; model?: string; source?: RunSource }
     | { type: "step.started"; index: number }
     | { type: "step.committed"; index: number; usage?: Usage }
     | { type: "run.suspended"; stopReason: StopReason; detail?: unknown }
