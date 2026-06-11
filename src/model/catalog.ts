@@ -86,11 +86,12 @@ export const CATALOG: CatalogEntry[] = [
     // Most models are OpenAI-compatible; MiniMax/Qwen speak the Anthropic
     // protocol at the same endpoint with the same key — routed automatically.
     sampleModels: ["glm-5.1", "kimi-k2.6", "deepseek-v4-pro", "minimax-m3", "qwen3.7-max"],
+    // OpenCode's Anthropic endpoint authenticates with x-api-key (the anthropic
+    // default), like Claude Code — not Authorization: Bearer.
     overrides: [
       {
         models: ["minimax-m3", "minimax-m2.7", "minimax-m2.5", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus"],
         kind: "anthropic",
-        auth: "bearer",
       },
     ],
   },

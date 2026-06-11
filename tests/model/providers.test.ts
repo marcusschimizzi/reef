@@ -62,9 +62,9 @@ describe("ProviderRegistry", () => {
     };
     // a GLM model keeps the provider default (openai-compatible)
     expect(withOverride(config, "glm-5.1").kind).toBe("openai-compatible");
-    // a MiniMax/Qwen model is routed to the anthropic protocol + bearer, same key/baseURL
+    // a MiniMax/Qwen model is routed to the anthropic protocol, same key/baseURL
     const minimax = withOverride(config, "minimax-m3");
-    expect(minimax).toMatchObject({ kind: "anthropic", auth: "bearer", apiKeyEnv: "OPENCODE_API_KEY" });
+    expect(minimax).toMatchObject({ kind: "anthropic", apiKeyEnv: "OPENCODE_API_KEY" });
     expect(minimax.baseURL).toBe(config.baseURL);
 
     // and both resolve through one registry/provider without error
