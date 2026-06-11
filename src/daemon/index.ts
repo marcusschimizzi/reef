@@ -106,6 +106,18 @@ if (HEARTBEAT_MINUTES > 0) {
     intervalSeconds: HEARTBEAT_MINUTES * 60,
   });
 }
+// File-watch reactions declared in config (Phase 4d): find-or-create + arm each.
+for (const w of config.watches) {
+  daemon.ensureWatch({
+    agentId: w.agentId || DEFAULT_AGENT.id,
+    path: w.path,
+    input: w.input,
+    events: w.events,
+    recursive: w.recursive,
+    debounceMs: w.debounceMs,
+    cooldownMs: w.cooldownMs,
+  });
+}
 
 const server = startSocketServer(daemon, SOCKET_PATH, DEFAULT_AGENT.id);
 const httpServer = startHttpInterface(daemon, {

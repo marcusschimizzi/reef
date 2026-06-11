@@ -49,6 +49,23 @@ const surfaceSchema = z.discriminatedUnion("kind", [
   }),
 ]);
 
+const watchSchema = z.object({
+  /** Path to watch (file or directory). */
+  path: z.string().min(1),
+  /** The instruction reef runs when the path changes (the changed file is appended). */
+  input: z.string().min(1),
+  /** Agent to run as (defaults to the daemon's default agent). */
+  agentId: z.string().optional(),
+  /** Which change kinds fire (default both). */
+  events: z.array(z.enum(["change", "rename"])).optional(),
+  /** Watch subdirectories too (macOS/Windows; default false). */
+  recursive: z.boolean().optional(),
+  /** Coalesce a save burst into one fire (ms; default 300). */
+  debounceMs: z.number().int().nonnegative().optional(),
+  /** Minimum gap between fires — tames self-feedback (ms; default 2000). */
+  cooldownMs: z.number().int().nonnegative().optional(),
+});
+
 const configSchema = z.object({
   /** Default agent model as `provider/model` (env REEF_MODEL still overrides). */
   defaultModel: z.string().optional(),
@@ -62,7 +79,20 @@ const configSchema = z.object({
   proactiveApproval: z.enum(["deny", "route"]).optional(),
   /** Seconds before an unanswered routed approval auto-denies (default 3600). */
   proactiveApprovalTimeoutSeconds: z.number().int().positive().optional(),
+  /** File-watch reactions (Phase 4d) — ensured at startup, find-or-create by path. */
+  watches: z.array(watchSchema).optional(),
 });
+
+/** A declarative file-watch reaction (Phase 4d), ensured at daemon startup. */
+export interface WatchConfig {
+  path: string;
+  input: string;
+  agentId?: string;
+  events?: ("change" | "rename")[];
+  recursive?: boolean;
+  debounceMs?: number;
+  cooldownMs?: number;
+}
 
 export interface ReefConfig {
   defaultModel?: string;
@@ -71,9 +101,10 @@ export interface ReefConfig {
   surfaces: SurfaceConfig[];
   proactiveApproval: "deny" | "route";
   proactiveApprovalTimeoutSeconds?: number;
+  watches: WatchConfig[];
 }
 
-const EMPTY: ReefConfig = { providers: [], surfaces: [], proactiveApproval: "deny" };
+const EMPTY: ReefConfig = { providers: [], surfaces: [], proactiveApproval: "deny", watches: [] };
 
 /** The raw config object on disk (unknown keys intact), or undefined if absent.
  *  Editors (the CLI, the TUI) work on the raw object so they preserve keys the
@@ -99,6 +130,7 @@ export function parseConfig(raw: unknown): ReefConfig {
     surfaces: (parsed.surfaces ?? []) as SurfaceConfig[],
     proactiveApproval: parsed.proactiveApproval ?? "deny",
     proactiveApprovalTimeoutSeconds: parsed.proactiveApprovalTimeoutSeconds,
+    watches: (parsed.watches ?? []) as WatchConfig[],
   };
 }
 

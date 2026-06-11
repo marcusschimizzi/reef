@@ -31,12 +31,13 @@ describe("loadConfig", () => {
       providers: [{ id: "zai", kind: "openai-compatible", baseURL: "https://api.z.ai/v1", apiKeyEnv: "ZAI_API_KEY" }],
       surfaces: [],
       proactiveApproval: "deny",
+      watches: [],
     });
   });
 
   it("returns safe defaults when the path is unset or missing", () => {
-    expect(loadConfig(undefined)).toEqual({ providers: [], surfaces: [], proactiveApproval: "deny" });
-    expect(loadConfig("/no/such/config.json")).toEqual({ providers: [], surfaces: [], proactiveApproval: "deny" });
+    expect(loadConfig(undefined)).toEqual({ providers: [], surfaces: [], proactiveApproval: "deny", watches: [] });
+    expect(loadConfig("/no/such/config.json")).toEqual({ providers: [], surfaces: [], proactiveApproval: "deny", watches: [] });
   });
 
   it("parses surfaces and proactive-approval settings", () => {
@@ -54,9 +55,20 @@ describe("loadConfig", () => {
     });
   });
 
+  it("parses file-watch reactions (Phase 4d)", () => {
+    const path = tmpFile(
+      JSON.stringify({
+        watches: [{ path: "/proj/src", input: "re-run checks", events: ["change"], recursive: true, debounceMs: 500 }],
+      }),
+    );
+    expect(loadConfig(path).watches).toEqual([
+      { path: "/proj/src", input: "re-run checks", events: ["change"], recursive: true, debounceMs: 500 },
+    ]);
+  });
+
   it("falls back to defaults (and logs) on invalid JSON or a schema violation", () => {
     const logs: string[] = [];
-    const empty = { providers: [], surfaces: [], proactiveApproval: "deny" };
+    const empty = { providers: [], surfaces: [], proactiveApproval: "deny", watches: [] };
     expect(loadConfig(tmpFile("{ broken"), (m) => logs.push(m))).toEqual(empty);
     // bad provider kind → schema violation
     const badKind = tmpFile(JSON.stringify({ providers: [{ id: "x", kind: "grpc" }] }));
@@ -69,13 +81,13 @@ describe("loadConfig", () => {
     const path = tmpFile(
       JSON.stringify({ providers: [{ id: "zai", kind: "openai-compatible", baseURL: "https://x", apiKeyEnv: "sk-leak.123" }] }),
     );
-    expect(loadConfig(path, (m) => logs.push(m))).toEqual({ providers: [], surfaces: [], proactiveApproval: "deny" });
+    expect(loadConfig(path, (m) => logs.push(m))).toEqual({ providers: [], surfaces: [], proactiveApproval: "deny", watches: [] });
     expect(logs.join(" ")).not.toContain("sk-leak.123");
   });
 
   it("tolerates unknown keys (a newer config still loads on an older reef)", () => {
     const path = tmpFile(JSON.stringify({ defaultModel: "x", somethingNew: true }));
-    expect(loadConfig(path)).toEqual({ defaultModel: "x", providers: [], surfaces: [], proactiveApproval: "deny" });
+    expect(loadConfig(path)).toEqual({ defaultModel: "x", providers: [], surfaces: [], proactiveApproval: "deny", watches: [] });
   });
 
   it("never accepts a literal api key (secrets stay in env)", () => {

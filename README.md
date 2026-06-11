@@ -3,9 +3,9 @@
 Reef is an always-on autonomous agent daemon. One agent runs a single durable
 loop — think → act → observe — persisting one step per iteration to SQLite, so a
 crash mid-run is recovered by querying the database, not guessing. It wakes for
-user messages, scheduled/heartbeat triggers, and wakes it schedules for itself,
-and emits a native typed event stream that consumers (a terminal UI, conch)
-project from.
+user messages, scheduled/heartbeat triggers, file-watch reactions, and wakes it
+schedules for itself, and emits a native typed event stream that consumers (a
+terminal UI, conch) project from.
 
 ## Run it
 
@@ -50,6 +50,25 @@ Go, extending the built-ins), and `policyFile`. **Secrets never go here** — a
 provider names the env var its key comes from (`apiKeyEnv`). An env var overrides
 the matching config key (`REEF_MODEL`, `REEF_POLICY_FILE`), so the precedence is
 env → config → built-in default.
+
+### React to file changes
+
+A `watches` array makes reef run an instruction whenever a path changes — the
+first event-driven wake (vs. the time-driven schedule/heartbeat triggers):
+
+```json
+"watches": [
+  { "path": "./notes", "input": "A note changed — update affected memories.", "recursive": true }
+]
+```
+
+Each entry is ensured at startup (find-or-create by path) and managed alongside
+the other triggers. The changed file is appended to the instruction so the run
+knows what changed. `debounceMs` coalesces an editor's save burst into one fire;
+`cooldownMs` is the minimum gap between fires (the guard against a watch that
+reacts to reef's own writes); `events` filters `change`/`rename`; `recursive`
+includes subdirectories. Watch runs are proactive, so the approval policy governs
+any gated tools just as it does for scheduled runs.
 
 Edit it with the `config` CLI (every change is validated before writing; restart
 the daemon to apply):

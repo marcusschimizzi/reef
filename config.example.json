@@ -17,6 +17,17 @@
     }
   ],
 
+  "$comment_watches": "File-watch reactions (Phase 4d): reef runs `input` when `path` changes (the changed file is appended to the instruction). Ensured at startup, find-or-create by path. Event-driven (no schedule). debounceMs coalesces an editor's save burst; cooldownMs is the min gap between fires (tames a watch that reacts to reef's own writes). events filters change|rename (default both); recursive watches subdirectories (macOS/Windows). Proactive runs, so the approval policy governs gated tools.",
+  "watches": [
+    {
+      "path": "./notes",
+      "input": "A file in ./notes changed. Review the change and update any affected memories.",
+      "recursive": true,
+      "debounceMs": 500,
+      "cooldownMs": 5000
+    }
+  ],
+
   "providers": [
     {
       "$comment": "Z.ai general API (OpenAI-compatible). Models: glm-4.6, glm-4.7, glm-5.1. Set ZAI_API_KEY. e.g. zai/glm-4.6",

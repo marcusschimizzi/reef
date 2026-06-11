@@ -32,6 +32,10 @@ describe("nextFireTime", () => {
     expect(nextFireTime({ kind: "once", at }, new Date("2026-06-10T09:00:00.000Z"))).toBeUndefined();
     expect(nextFireTime({ kind: "once", at }, new Date("2026-06-10T10:00:00.000Z"))).toBeUndefined();
   });
+
+  it("never time-fires a watch (event-driven — its nextFireAt stays null)", () => {
+    expect(nextFireTime({ kind: "watch", path: "/tmp" }, new Date())).toBeUndefined();
+  });
 });
 
 describe("assertValidSpec", () => {
@@ -51,5 +55,10 @@ describe("assertValidSpec", () => {
   it("accepts a valid one-shot instant and rejects garbage", () => {
     expect(() => assertValidSpec({ kind: "once", at: "2026-06-11T09:00:00Z" })).not.toThrow();
     expect(() => assertValidSpec({ kind: "once", at: "whenever" })).toThrow(/valid ISO-8601/);
+  });
+
+  it("accepts a watch with a path and rejects an empty one", () => {
+    expect(() => assertValidSpec({ kind: "watch", path: "/tmp/project" })).not.toThrow();
+    expect(() => assertValidSpec({ kind: "watch", path: "  " })).toThrow(/non-empty path/);
   });
 });

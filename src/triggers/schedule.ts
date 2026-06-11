@@ -30,6 +30,10 @@ export function nextFireTime(spec: TriggerSpec, after: Date): Date | undefined {
       const at = new Date(spec.at);
       return at.getTime() > after.getTime() ? at : undefined;
     }
+    case "watch":
+      // Event-driven (Phase 4d): no time fire. Returning undefined keeps its
+      // `nextFireAt` null so the time scheduler ignores it; the FileWatcher drives it.
+      return undefined;
   }
 }
 
@@ -43,6 +47,10 @@ export function assertValidSpec(spec: TriggerSpec): void {
     if (Number.isNaN(Date.parse(spec.at))) {
       throw new Error(`once trigger needs a valid ISO-8601 instant: ${spec.at}`);
     }
+    return;
+  }
+  if (spec.kind === "watch") {
+    if (!spec.path.trim()) throw new Error("watch trigger needs a non-empty path");
     return;
   }
   // Constructing a Cron throws on an unparseable expression.

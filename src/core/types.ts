@@ -138,14 +138,27 @@ export interface Compaction {
  */
 export type RunSource =
   | { kind: "message" }
-  | { kind: "trigger"; triggerId: string; triggerType: TriggerType };
+  | { kind: "trigger"; triggerId: string; triggerType: TriggerType; event?: WatchEvent };
 
 /**
  * A wake source beyond the inbound message (Phase 4). `schedule` = a
  * user-intended routine that fires on time; `heartbeat` = opportunistic
- * self-maintenance that yields to the proactive gate when reef is busy.
+ * self-maintenance that yields to the proactive gate when reef is busy;
+ * `watch` = a reaction to a filesystem change (Phase 4d), event-driven rather
+ * than time-driven (it has no `nextFireAt`; an fs-watcher drives it).
  */
-export type TriggerType = "schedule" | "heartbeat";
+export type TriggerType = "schedule" | "heartbeat" | "watch";
+
+/** Which filesystem change kinds a watch reacts to (Node's fs.watch events). */
+export type WatchEventKind = "change" | "rename";
+
+/** The concrete filesystem change that fired a watch trigger — threaded into the
+ *  wake so the run knows *what* changed, not just that something did. */
+export interface WatchEvent {
+  type: WatchEventKind;
+  /** The changed path (the watched path joined with the reported filename). */
+  path: string;
+}
 
 /**
  * Who authored a trigger (Phase 4c). `operator` = created out-of-band by a human
@@ -163,7 +176,22 @@ export type TriggerOrigin = "operator" | "agent";
 export type TriggerSpec =
   | { kind: "cron"; expr: string; tz?: string }
   | { kind: "interval"; seconds: number }
-  | { kind: "once"; at: string };
+  | { kind: "once"; at: string }
+  /**
+   * React to filesystem changes under `path` (Phase 4d). Event-driven, not
+   * time-driven — it has no next-fire time; the FileWatcher subscribes and
+   * enqueues a wake on change. `debounceMs` coalesces an editor's save burst;
+   * `cooldownMs` is the minimum gap between fires (tames a watch that reacts to
+   * the agent's own writes). `events` filters which change kinds fire (default both).
+   */
+  | {
+      kind: "watch";
+      path: string;
+      events?: WatchEventKind[];
+      recursive?: boolean;
+      debounceMs?: number;
+      cooldownMs?: number;
+    };
 
 /**
  * What to do with fires that were due while the daemon was down. `fire_once`

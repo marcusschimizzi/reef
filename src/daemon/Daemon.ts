@@ -16,12 +16,15 @@ import type {
   TriggerOrigin,
   TriggerSpec,
   TriggerType,
+  WatchEvent,
+  WatchEventKind,
 } from "../core/types.js";
 import { Spine } from "../db/spine.js";
 import { BoundFs } from "../fs/capability.js";
 import { runAgentLoop, type LoopOptions } from "../loop/AgentLoop.js";
 import { assertValidSpec, nextFireTime } from "../triggers/schedule.js";
 import { DaemonScheduler, triggerSessionKey } from "../triggers/capability.js";
+import { FileWatcher, type WatchFactory } from "../triggers/watcher.js";
 import { DefaultGate, type ProactiveGate } from "../triggers/gate.js";
 import { DefaultPolicy, type ApprovalPolicy } from "../policy/policy.js";
 import { DaemonIntrospection } from "../introspect/capability.js";
@@ -63,6 +66,8 @@ export interface DaemonOptions {
   surfaces?: Surface[];
   /** Seconds before a routed proactive approval auto-denies (default 3600). */
   proactiveApprovalTimeoutSeconds?: number;
+  /** Injectable fs-watch factory for file-watch triggers (Phase 4d); defaults to node:fs watch. */
+  watchFactory?: WatchFactory;
 }
 
 /** Default self-maintenance instruction for a heartbeat trigger (Phase 4b). */
@@ -90,7 +95,9 @@ const MISSED_GRACE_MS = 90_000;
 type Job =
   | { kind: "message"; wake: Wake }
   | { kind: "resume"; runId: string }
-  | { kind: "trigger"; triggerId: string };
+  // `event` is set when a file-watch trigger fired (Phase 4d) — the change to
+  // thread into the wake; absent for time-driven (schedule/heartbeat) fires.
+  | { kind: "trigger"; triggerId: string; event?: WatchEvent };
 
 /**
  * The always-on agent runtime. Owns the spine (state), the router (model), the
@@ -110,6 +117,9 @@ export class Daemon {
   /** One memory store per agent, built lazily and reused across that agent's runs. */
   private readonly memories = new Map<string, MemoryStore>();
   private readonly scheduler: Scheduler;
+  /** Event-driven driver for file-watch triggers (Phase 4d) — the fs counterpart
+   *  to the time scheduler; both feed the same trigger inbox job. */
+  private readonly watcher: FileWatcher;
   private readonly gate: ProactiveGate;
   private readonly policy: ApprovalPolicy;
   private readonly surfaces: Surface[];
@@ -146,6 +156,12 @@ export class Daemon {
       this.tools.register(tool);
     }
     this.inbox = new Inbox<Job>((job) => this.processJob(job));
+    // File-watch triggers (Phase 4d): on a change, enqueue the same trigger job
+    // the time scheduler would — so a reaction runs through processTrigger.
+    this.watcher = new FileWatcher(
+      (triggerId, event) => void this.inbox.enqueue({ kind: "trigger", triggerId, event }),
+      opts.watchFactory,
+    );
     // Watch our own event stream to route proactive approval requests out to
     // surfaces (and arm their auto-deny deadline). Inert unless a proactive run
     // actually suspends for approval — which only happens when routing is on.
@@ -268,13 +284,16 @@ export class Daemon {
     return true;
   }
 
-  /** Begin firing triggers on the scheduler's cadence. Call after recover(). */
+  /** Begin firing triggers on the scheduler's cadence and arm file-watch
+   *  triggers restored from the durable table. Call after recover(). */
   start(): void {
     this.scheduler.start();
+    this.watcher.start(this.spine.listTriggers());
   }
 
   close(): void {
     this.scheduler.stop();
+    this.watcher.stop();
     this.spine.close();
   }
 
@@ -309,7 +328,46 @@ export class Daemon {
       createdAt: nowIso(),
     };
     this.spine.createTrigger(trigger);
+    // A live-created watch starts watching now (start() handles ones restored
+    // from the table); the register is idempotent so both paths are safe.
+    if (trigger.type === "watch" && trigger.enabled) this.watcher.register(trigger);
     return trigger;
+  }
+
+  /**
+   * Find-or-create a file-watch trigger for `path` (Phase 4d) — idempotent per
+   * (agent, path) so the config-declared watches can be ensured on every startup
+   * without piling up duplicates, exactly like the heartbeat. Operator-created
+   * (the agent doesn't self-watch yet); `skip` catch-up since a watch has no
+   * missed-fire notion.
+   */
+  ensureWatch(input: {
+    agentId: string;
+    path: string;
+    input: string;
+    events?: WatchEventKind[];
+    recursive?: boolean;
+    debounceMs?: number;
+    cooldownMs?: number;
+  }): Trigger {
+    const existing = this.spine
+      .listTriggers(input.agentId)
+      .find((t) => t.spec.kind === "watch" && t.spec.path === input.path);
+    if (existing) return existing;
+    return this.createTrigger({
+      agentId: input.agentId,
+      type: "watch",
+      spec: {
+        kind: "watch",
+        path: input.path,
+        events: input.events,
+        recursive: input.recursive,
+        debounceMs: input.debounceMs,
+        cooldownMs: input.cooldownMs,
+      },
+      input: input.input,
+      catchUpPolicy: "skip",
+    });
   }
 
   listTriggers(agentId?: string): Trigger[] {
@@ -404,6 +462,11 @@ export class Daemon {
       nextFireAt: enabled ? nextFireTime(t.spec, new Date())?.toISOString() : undefined,
       lastFiredAt: t.lastFiredAt,
     });
+    // A watch trigger has no nextFireAt; its enablement is the OS watch itself.
+    if (t.spec.kind === "watch") {
+      if (enabled) this.watcher.register({ ...t, enabled: true });
+      else this.watcher.unregister(id);
+    }
     return true;
   }
 
@@ -445,7 +508,7 @@ export class Daemon {
 
   private async processJob(job: Job): Promise<void> {
     if (job.kind === "message") return this.processWake(job.wake);
-    if (job.kind === "trigger") return this.processTrigger(job.triggerId);
+    if (job.kind === "trigger") return this.processTrigger(job.triggerId, job.event);
     return this.resumeRun(job.runId);
   }
 
@@ -470,8 +533,10 @@ export class Daemon {
   }
 
   /** A trigger fired: seed its configured instruction as the wake and run, on
-   *  the trigger's stable session, tagged as a proactive run. */
-  private async processTrigger(triggerId: string): Promise<void> {
+   *  the trigger's stable session, tagged as a proactive run. For a file-watch
+   *  fire (Phase 4d) the change is appended to the instruction and carried on the
+   *  source, so the run knows what changed. */
+  private async processTrigger(triggerId: string, event?: WatchEvent): Promise<void> {
     const trigger = this.spine.getTrigger(triggerId);
     if (!trigger || !trigger.enabled) return;
     this.spine.ensureSession(
@@ -479,9 +544,10 @@ export class Daemon {
       trigger.agentId,
       this.spine.getAgent(trigger.agentId)?.model,
     );
-    this.spine.appendMessage(trigger.sessionKey, "user", [
-      { type: "text", text: trigger.input },
-    ]);
+    const text = event
+      ? `${trigger.input}\n\n(file event: ${event.type} at ${event.path})`
+      : trigger.input;
+    this.spine.appendMessage(trigger.sessionKey, "user", [{ type: "text", text }]);
     const run = this.spine.createRun({
       id: newRunId(),
       agentId: trigger.agentId,
@@ -491,10 +557,11 @@ export class Daemon {
       kind: "trigger",
       triggerId: trigger.id,
       triggerType: trigger.type,
+      ...(event ? { event } : {}),
     };
     this.sink.emit({
       type: "message.received",
-      text: trigger.input,
+      text,
       source,
       sessionKey: trigger.sessionKey,
       runId: run.id,
