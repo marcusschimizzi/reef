@@ -64,6 +64,15 @@ describe("loadConfig", () => {
     expect(logs).toHaveLength(2);
   });
 
+  it("rejects a value-like apiKeyEnv (a key must never live in config) without echoing it", () => {
+    const logs: string[] = [];
+    const path = tmpFile(
+      JSON.stringify({ providers: [{ id: "zai", kind: "openai-compatible", baseURL: "https://x", apiKeyEnv: "sk-leak.123" }] }),
+    );
+    expect(loadConfig(path, (m) => logs.push(m))).toEqual({ providers: [], surfaces: [], proactiveApproval: "deny" });
+    expect(logs.join(" ")).not.toContain("sk-leak.123");
+  });
+
   it("tolerates unknown keys (a newer config still loads on an older reef)", () => {
     const path = tmpFile(JSON.stringify({ defaultModel: "x", somethingNew: true }));
     expect(loadConfig(path)).toEqual({ defaultModel: "x", providers: [], surfaces: [], proactiveApproval: "deny" });

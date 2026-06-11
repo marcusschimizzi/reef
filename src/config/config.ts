@@ -17,7 +17,12 @@ const providerSchema = z.object({
   id: z.string().min(1),
   kind: z.enum(["anthropic", "openai", "openai-compatible"]),
   baseURL: z.string().optional(),
-  apiKeyEnv: z.string().optional(),
+  // Must be an env var NAME (the key lives in that var) — never the key itself.
+  // Rejecting value-like input here stops a secret from being stored in config.
+  apiKeyEnv: z
+    .string()
+    .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "apiKeyEnv must be an environment variable name, not the key")
+    .optional(),
   auth: z.enum(["bearer", "x-api-key"]).optional(),
 });
 

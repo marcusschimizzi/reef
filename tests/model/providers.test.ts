@@ -70,9 +70,18 @@ describe("missingProviderKeys", () => {
       { id: "literal", kind: "openai", apiKey: "sk-..." }, // literal key → fine
       { id: "ollama", kind: "openai-compatible", baseURL: "https://x" }, // no key needed
     ]);
-    expect(missing).toEqual(["needy (SOME_KEY)"]);
+    expect(missing).toEqual(["needy (set SOME_KEY)"]);
 
     process.env.SOME_KEY = "set-now";
     expect(missingProviderKeys([{ id: "needy", kind: "openai-compatible", apiKeyEnv: "SOME_KEY" }])).toEqual([]);
+  });
+
+  it("never echoes a value-like apiKeyEnv (no secret in logs)", () => {
+    const missing = missingProviderKeys([
+      { id: "zai", kind: "openai-compatible", baseURL: "https://x", apiKeyEnv: "sk-super-secret-123" },
+    ]);
+    expect(missing).toHaveLength(1);
+    expect(missing[0]).not.toContain("sk-super-secret-123");
+    expect(missing[0]).toMatch(/must be an env var NAME/);
   });
 });

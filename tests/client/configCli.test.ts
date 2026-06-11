@@ -63,6 +63,15 @@ describe("runConfigCli", () => {
     expect((x.current?.providers as Array<{ baseURL: string }>)[0]?.baseURL).toBe("https://b/v1");
   });
 
+  it("refuses a value-like --api-key-env and never echoes the secret", () => {
+    const x = io();
+    expect(
+      runConfigCli(["provider", "add", "zai", "openai-compatible", "--base-url", "https://x", "--api-key-env", "sk-leak-xyz"], x),
+    ).toBe(1);
+    expect(x.current).toBeUndefined(); // nothing written
+    expect(x.lines.join(" ")).not.toContain("sk-leak-xyz");
+  });
+
   it("refuses an invalid edit (bad provider kind) and does not write", () => {
     const x = io({ defaultModel: "keep" });
     expect(runConfigCli(["provider", "add", "x", "grpc"], x)).toBe(1);

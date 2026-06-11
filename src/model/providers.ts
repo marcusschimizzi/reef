@@ -95,15 +95,27 @@ function apiKeyOf(c: ProviderConfig): string | undefined {
   return key?.trim() ? key : undefined; // empty/whitespace → treat as unset
 }
 
+/** A valid environment variable name (so we never treat a key value as one). */
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
 /**
- * Configured providers whose API key env var is unset or empty — so the daemon
- * can warn at startup instead of failing with a 401 mid-run. Returns
- * `["zai (ZAI_API_KEY)", …]` for the offenders.
+ * Configured providers whose API key env var is unset/empty — so the daemon can
+ * warn at startup instead of failing with a 401 mid-run. NEVER echoes the
+ * apiKeyEnv value unless it is a syntactically valid env var *name*; a value
+ * placed there (a misconfigured key) is reported as an error, never printed —
+ * otherwise the warning would leak the secret.
  */
 export function missingProviderKeys(providers: ProviderConfig[]): string[] {
-  return providers
-    .filter((p) => p.apiKeyEnv && !p.apiKey && !process.env[p.apiKeyEnv]?.trim())
-    .map((p) => `${p.id} (${p.apiKeyEnv})`);
+  const out: string[] = [];
+  for (const p of providers) {
+    if (p.apiKey || !p.apiKeyEnv) continue; // literal key, or no key needed
+    if (!ENV_NAME.test(p.apiKeyEnv)) {
+      out.push(`${p.id} (apiKeyEnv must be an env var NAME, not the key itself — fix the config)`);
+    } else if (!process.env[p.apiKeyEnv]?.trim()) {
+      out.push(`${p.id} (set ${p.apiKeyEnv})`);
+    }
+  }
+  return out;
 }
 
 function build(c: ProviderConfig): (model: string) => LanguageModel {
