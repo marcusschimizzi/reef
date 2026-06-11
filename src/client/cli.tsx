@@ -8,6 +8,7 @@ import { App } from "./tui/App.js";
 // native event stream.
 
 const socketPath = join(resolve(".reef"), "reef.sock");
+const configPath = process.env.REEF_CONFIG_FILE || join(resolve(".reef"), "config.json");
 
 function gitBranch(): string | undefined {
   try {
@@ -25,6 +26,7 @@ function gitBranch(): string | undefined {
 render(
   <App
     socketPath={socketPath}
+    configPath={configPath}
     session={{
       cwd: process.cwd(),
       branch: gitBranch(),

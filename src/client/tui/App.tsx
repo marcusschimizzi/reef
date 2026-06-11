@@ -12,8 +12,16 @@ import {
   type SessionInfo,
 } from "./components.js";
 import { SessionsView } from "./sessions.js";
+import { ConfigView, type ConfigProvider } from "./configView.js";
 import { Connection, type ConnStatus } from "./connection.js";
 import { resolveTheme } from "./theme.js";
+import {
+  applyConfigEdit,
+  readRawConfig,
+  writeRawConfig,
+  type ConfigEdit,
+  type ScalarKey,
+} from "../../config/config.js";
 import {
   emptyIndex,
   indexEvent,
@@ -38,6 +46,7 @@ const COMMANDS: Command[] = [
   { name: "help", description: "show available commands" },
   { name: "stop", description: "cancel the current run" },
   { name: "sessions", description: "back to the sessions list" },
+  { name: "config", description: "view & edit configuration" },
   { name: "clear", description: "clear the transcript" },
   { name: "quit", description: "exit reef" },
 ];
@@ -49,12 +58,13 @@ const HELP = [
 
 export interface AppProps {
   socketPath: string;
+  configPath: string;
   session: SessionInfo;
 }
 
-type View = "sessions" | "session";
+type View = "sessions" | "session" | "config";
 
-export function App({ socketPath, session }: AppProps) {
+export function App({ socketPath, configPath, session }: AppProps) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const theme = resolveTheme();
@@ -69,6 +79,12 @@ export function App({ socketPath, session }: AppProps) {
   // Bumped when the open session changes, to remount <Static> (its committed
   // line count must reset or it won't reprint after the transcript shrinks).
   const [generation, setGeneration] = useState(0);
+
+  // Config view (a third editing surface over .reef/config.json).
+  const [cfgRaw, setCfgRaw] = useState<Record<string, unknown>>({});
+  const [cfgSel, setCfgSel] = useState(0);
+  const [cfgEditing, setCfgEditing] = useState<string | null>(null); // edit buffer, or null
+  const [cfgStatus, setCfgStatus] = useState("");
 
   const connRef = useRef<Connection | null>(null);
   // The session whose transcript is open; a ref so the socket handlers (set up
@@ -150,6 +166,43 @@ export function App({ socketPath, session }: AppProps) {
     connRef.current?.listSessions(); // refresh titles/previews from the daemon
   }
 
+  function toConfig(): void {
+    setCfgRaw(readRawConfig(configPath) ?? {}); // load the raw file fresh
+    setCfgSel(0);
+    setCfgEditing(null);
+    setCfgStatus("");
+    setView("config");
+    setInput("");
+    leftPresses.current = 0;
+    stdout.write(CLEAR_SCREEN);
+  }
+
+  // The scalar value (model / policy file) at config-view row 0 / 1.
+  const cfgScalar = (row: number): string => {
+    const v = row === 0 ? cfgRaw.defaultModel : cfgRaw.policyFile;
+    return typeof v === "string" ? v : "";
+  };
+
+  /** Apply an edit to the config file, validating before writing (reusing the
+   *  same core the CLI uses); surface the outcome on the status line. */
+  function saveConfig(edit: ConfigEdit): void {
+    try {
+      const next = applyConfigEdit(cfgRaw, edit);
+      writeRawConfig(configPath, next);
+      setCfgRaw(next);
+      setCfgStatus("saved — restart the daemon to apply");
+    } catch (err) {
+      setCfgStatus(`invalid: ${configEditError(err)}`);
+    }
+  }
+
+  function submitConfigEdit(): void {
+    const key: ScalarKey = cfgSel === 0 ? "defaultModel" : "policyFile";
+    const value = (cfgEditing ?? "").trim();
+    saveConfig(value ? { op: "set", key, value } : { op: "unset", key });
+    setCfgEditing(null);
+  }
+
   // ── input handling ───────────────────────────────────────────────────────────
   // Sessions view: arrow-select rows; approve/deny in place; enter opens.
   useInput(
@@ -199,10 +252,41 @@ export function App({ socketPath, session }: AppProps) {
     { isActive: showPalette },
   );
 
+  // Config view: navigate fields/providers, edit scalars inline, remove a
+  // provider, `← ←` back. While editing, keys go to the field (Esc cancels).
+  useInput(
+    (key, k) => {
+      if (cfgEditing !== null) {
+        if (k.escape) setCfgEditing(null);
+        return; // the TextInput owns typing + submit
+      }
+      const providers = providersOf(cfgRaw);
+      const rowCount = 2 + providers.length;
+      if (k.upArrow) setCfgSel((s) => Math.max(0, s - 1));
+      else if (k.downArrow) setCfgSel((s) => Math.min(rowCount - 1, s + 1));
+      else if (k.return) {
+        if (cfgSel <= 1) setCfgEditing(cfgScalar(cfgSel)); // edit a scalar field
+      } else if (key === "x") {
+        const i = cfgSel - 2;
+        if (i >= 0 && i < providers.length) {
+          saveConfig({ op: "provider-rm", id: providers[i]!.id });
+          setCfgSel((s) => Math.min(s, rowCount - 2)); // a row went away
+        }
+      } else if (k.leftArrow) {
+        leftPresses.current += 1;
+        if (leftPresses.current >= 2) toSessions();
+      } else {
+        leftPresses.current = 0;
+      }
+    },
+    { isActive: view === "config" },
+  );
+
   function submit(line: string): void {
     const text = line.trim();
     setInput("");
     if (view === "sessions") {
+      if (text.startsWith("/")) return command(text.slice(1).split(/\s+/)[0] ?? "");
       if (text) newSession(text);
       else if (ordered[sessionSel]) openSession(ordered[sessionSel]!.sessionKey);
       return;
@@ -228,6 +312,9 @@ export function App({ socketPath, session }: AppProps) {
       case "sessions":
         toSessions();
         break;
+      case "config":
+        toConfig();
+        break;
       case "clear":
         stdout.write(CLEAR_SCREEN);
         setState(() => initialState);
@@ -244,6 +331,24 @@ export function App({ socketPath, session }: AppProps) {
   }
 
   // ── render ───────────────────────────────────────────────────────────────────
+  if (view === "config") {
+    return (
+      <Box flexDirection="column">
+        <ConfigView
+          theme={theme}
+          defaultModel={cfgScalar(0)}
+          policyFile={cfgScalar(1)}
+          providers={providersOf(cfgRaw)}
+          selected={cfgSel}
+          editing={cfgEditing}
+          onEditChange={setCfgEditing}
+          onEditSubmit={submitConfigEdit}
+          status={cfgStatus}
+        />
+      </Box>
+    );
+  }
+
   if (view === "sessions") {
     return (
       <Box flexDirection="column">
@@ -320,4 +425,21 @@ export function App({ socketPath, session }: AppProps) {
       </Box>
     </Box>
   );
+}
+
+/** Extract the custom-provider rows from the raw config object for display. */
+function providersOf(raw: Record<string, unknown>): ConfigProvider[] {
+  const list = Array.isArray(raw.providers) ? (raw.providers as Array<Record<string, unknown>>) : [];
+  return list.map((p) => ({
+    id: typeof p.id === "string" ? p.id : "",
+    kind: typeof p.kind === "string" ? p.kind : "",
+    baseURL: typeof p.baseURL === "string" ? p.baseURL : undefined,
+  }));
+}
+
+/** A short, readable reason from a config validation error (zod or otherwise). */
+function configEditError(err: unknown): string {
+  const issues = (err as { issues?: Array<{ message: string }> }).issues;
+  if (Array.isArray(issues)) return issues.map((i) => i.message).join("; ");
+  return err instanceof Error ? err.message : String(err);
 }

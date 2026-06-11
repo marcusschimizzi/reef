@@ -1,6 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { applyConfigEdit, type ConfigEdit, type ScalarKey } from "../config/config.js";
+import { join, resolve } from "node:path";
+import {
+  applyConfigEdit,
+  readRawConfig,
+  writeRawConfig,
+  type ConfigEdit,
+  type ScalarKey,
+} from "../config/config.js";
 
 // `reef config` — a small CLI over .reef/config.json. Reads/edits the raw file
 // (preserving unknown keys) and validates every change through the config schema
@@ -152,11 +157,8 @@ export function main(argv: string[]): void {
   const path = process.env.REEF_CONFIG_FILE || join(resolve(".reef"), "config.json");
   const io: ConfigIo = {
     path,
-    read: () => (existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>) : undefined),
-    write: (raw) => {
-      mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(path, `${JSON.stringify(raw, null, 2)}\n`);
-    },
+    read: () => readRawConfig(path),
+    write: (raw) => writeRawConfig(path, raw),
     out: (line) => process.stdout.write(`${line}\n`),
   };
   process.exitCode = runConfigCli(argv, io);

@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { z } from "zod";
 import type { ProviderConfig } from "../model/providers.js";
 
@@ -34,6 +35,20 @@ export interface ReefConfig {
 }
 
 const EMPTY: ReefConfig = { providers: [] };
+
+/** The raw config object on disk (unknown keys intact), or undefined if absent.
+ *  Editors (the CLI, the TUI) work on the raw object so they preserve keys the
+ *  schema doesn't know yet; loadConfig is for the daemon's typed read. */
+export function readRawConfig(path: string): Record<string, unknown> | undefined {
+  if (!existsSync(path)) return undefined;
+  return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+}
+
+/** Write a raw config object (pretty-printed), creating the directory if needed. */
+export function writeRawConfig(path: string, raw: Record<string, unknown>): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(raw, null, 2)}\n`);
+}
 
 /** Validate + normalize a raw config object (throws on a schema violation). */
 export function parseConfig(raw: unknown): ReefConfig {
