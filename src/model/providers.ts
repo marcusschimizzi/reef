@@ -22,6 +22,13 @@ export interface ProviderConfig {
   /** A literal API key, or `apiKeyEnv` to read one from the environment. */
   apiKey?: string;
   apiKeyEnv?: string;
+  /**
+   * How the key is sent. Matters for `anthropic`-kind gateways: "x-api-key" (the
+   * default — real Anthropic) vs "bearer" (`Authorization: Bearer`, what most
+   * Anthropic-compatible gateways like OpenCode want). openai/openai-compatible
+   * always use Bearer regardless.
+   */
+  auth?: "bearer" | "x-api-key";
 }
 
 /** Built-in providers, wired from conventional env vars (no config needed). The
@@ -84,13 +91,31 @@ export class ProviderRegistry {
 }
 
 function apiKeyOf(c: ProviderConfig): string | undefined {
-  return c.apiKey ?? (c.apiKeyEnv ? process.env[c.apiKeyEnv] : undefined);
+  const key = c.apiKey ?? (c.apiKeyEnv ? process.env[c.apiKeyEnv] : undefined);
+  return key?.trim() ? key : undefined; // empty/whitespace → treat as unset
+}
+
+/**
+ * Configured providers whose API key env var is unset or empty — so the daemon
+ * can warn at startup instead of failing with a 401 mid-run. Returns
+ * `["zai (ZAI_API_KEY)", …]` for the offenders.
+ */
+export function missingProviderKeys(providers: ProviderConfig[]): string[] {
+  return providers
+    .filter((p) => p.apiKeyEnv && !p.apiKey && !process.env[p.apiKeyEnv]?.trim())
+    .map((p) => `${p.id} (${p.apiKeyEnv})`);
 }
 
 function build(c: ProviderConfig): (model: string) => LanguageModel {
   switch (c.kind) {
     case "anthropic": {
-      const provider = createAnthropic({ apiKey: apiKeyOf(c), baseURL: c.baseURL });
+      const key = apiKeyOf(c);
+      // Bearer (authToken) for gateways; x-api-key (apiKey) for real Anthropic.
+      const provider = createAnthropic(
+        c.auth === "bearer"
+          ? { baseURL: c.baseURL, authToken: key }
+          : { baseURL: c.baseURL, apiKey: key },
+      );
       return (model) => provider(model);
     }
     case "openai": {

@@ -11,6 +11,7 @@ import { loadPolicy } from "../policy/config.js";
 import { DefaultPolicy } from "../policy/policy.js";
 import { buildSurfaces } from "../surfaces/index.js";
 import { VercelRouter } from "../model/router.js";
+import { missingProviderKeys } from "../model/providers.js";
 import { startSocketServer } from "./socket.js";
 
 loadEnv();
@@ -74,6 +75,10 @@ const DEFAULT_AGENT: AgentRecord = {
 // policy's proactive-gated action follows that, and surfaces are the channels.
 const routeApprovals = config.proactiveApproval === "route";
 const surfaces = buildSurfaces(config.surfaces, log);
+// Warn loudly if a configured provider's API key env var is unset/empty — the
+// usual cause of a mid-run 401.
+const missingKeys = missingProviderKeys(config.providers);
+if (missingKeys.length) log(`WARN providers with no API key in env: ${missingKeys.join(", ")}`);
 const fallbackPolicy = new DefaultPolicy({ proactiveGatedAction: routeApprovals ? "gate" : "deny" });
 
 const daemon = new Daemon({

@@ -38,6 +38,7 @@ const USAGE = [
   "       kind: anthropic | openai | openai-compatible",
   "       --base-url <url>                API base URL (required for openai-compatible)",
   "       --api-key-env <VAR>             env var the API key is read from (never the key)",
+  "       --auth <bearer|x-api-key>       auth scheme (anthropic gateways: bearer)",
   "  provider rm <id>                     remove a provider",
   "",
   "Edits apply on the next daemon restart.",
@@ -114,7 +115,8 @@ function provider(args: string[], io: ConfigIo, raw: Record<string, unknown>): n
       if (!id || !kind) return fail(io, "provider add needs <id> <kind>");
       const baseURL = flag(rest, "--base-url");
       const apiKeyEnv = flag(rest, "--api-key-env");
-      return commit(io, raw, { op: "provider-set", provider: { id, kind, baseURL, apiKeyEnv } });
+      const auth = flag(rest, "--auth"); // bearer | x-api-key (anthropic gateways)
+      return commit(io, raw, { op: "provider-set", provider: { id, kind, baseURL, apiKeyEnv, auth } });
     }
     case "rm": {
       const id = rest[0];

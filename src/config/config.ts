@@ -18,6 +18,7 @@ const providerSchema = z.object({
   kind: z.enum(["anthropic", "openai", "openai-compatible"]),
   baseURL: z.string().optional(),
   apiKeyEnv: z.string().optional(),
+  auth: z.enum(["bearer", "x-api-key"]).optional(),
 });
 
 // Surfaces: outbound channels (desktop notification, webhook). A webhook's URL
@@ -92,7 +93,10 @@ export type ScalarKey = "defaultModel" | "policyFile";
 export type ConfigEdit =
   | { op: "set"; key: ScalarKey; value: string }
   | { op: "unset"; key: ScalarKey }
-  | { op: "provider-set"; provider: { id: string; kind: string; baseURL?: string; apiKeyEnv?: string } }
+  | {
+      op: "provider-set";
+      provider: { id: string; kind: string; baseURL?: string; apiKeyEnv?: string; auth?: string };
+    }
   | { op: "provider-rm"; id: string };
 
 /**

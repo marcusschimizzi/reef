@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { ProviderRegistry, parseModelId } from "../../src/model/providers.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { ProviderRegistry, missingProviderKeys, parseModelId } from "../../src/model/providers.js";
 
 describe("parseModelId", () => {
   it("splits on the first slash; the model may contain more (OpenRouter)", () => {
@@ -46,5 +46,33 @@ describe("ProviderRegistry", () => {
       { id: "openai", kind: "openai-compatible", baseURL: "https://proxy.local/v1", apiKey: "k" },
     ]);
     expect(r.resolve("openai/gpt-4o")).toBeDefined(); // resolves via the override
+  });
+
+  it("resolves an anthropic-compatible gateway using bearer auth", () => {
+    const r = new ProviderRegistry([
+      { id: "opencode-anthropic", kind: "anthropic", baseURL: "https://opencode.ai/zen/go/v1", apiKey: "k", auth: "bearer" },
+    ]);
+    expect(r.resolve("opencode-anthropic/minimax-m3")).toBeDefined();
+  });
+});
+
+describe("missingProviderKeys", () => {
+  const saved = process.env.SOME_KEY;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.SOME_KEY;
+    else process.env.SOME_KEY = saved;
+  });
+
+  it("flags providers whose key env var is unset or empty, not those with a key", () => {
+    delete process.env.SOME_KEY;
+    const missing = missingProviderKeys([
+      { id: "needy", kind: "openai-compatible", baseURL: "https://x", apiKeyEnv: "SOME_KEY" },
+      { id: "literal", kind: "openai", apiKey: "sk-..." }, // literal key → fine
+      { id: "ollama", kind: "openai-compatible", baseURL: "https://x" }, // no key needed
+    ]);
+    expect(missing).toEqual(["needy (SOME_KEY)"]);
+
+    process.env.SOME_KEY = "set-now";
+    expect(missingProviderKeys([{ id: "needy", kind: "openai-compatible", apiKeyEnv: "SOME_KEY" }])).toEqual([]);
   });
 });
