@@ -1,21 +1,21 @@
 // The model router — reef's thin seam over the vendored provider layer
 // (Vercel AI SDK). The loop depends on the `ModelRouter` *interface*; nothing
 // above this file imports an `ai`-package type. Provider-specific shape
-// (Anthropic tool-result output kinds, usage field names, the tool-call part
-// format) is quarantined here. A second provider is a new `resolveModel` branch
-// — not a change to the loop (reef-docs/09: own the loop, vendor the routing).
+// (tool-result output kinds, usage field names, the tool-call part format) is
+// quarantined here; provider *selection* lives in the ProviderRegistry. Adding a
+// provider is config, not a code change (reef-docs/09: own the loop, vendor the
+// routing).
 
-import { anthropic } from "@ai-sdk/anthropic";
 import {
   streamText,
   tool,
   type JSONValue,
-  type LanguageModel,
   type ModelMessage,
   type ToolSet,
 } from "ai";
 import type { z } from "zod";
 import type { ContentBlock, Message, Usage } from "../core/types.js";
+import { ProviderRegistry, type ProviderConfig } from "./providers.js";
 
 /** A tool as the *model* needs to see it — name, description, input schema.
  *  (Execution is the loop's job, via the full Tool + its context.) */
@@ -51,16 +51,17 @@ export interface ModelRouter {
   generateTurn(input: ModelTurnInput): Promise<ModelTurn>;
 }
 
-/** Maps a model id to a vendored provider model. v1: Anthropic only. */
-function resolveModel(id: string): LanguageModel {
-  const bare = id.startsWith("anthropic/") ? id.slice("anthropic/".length) : id;
-  return anthropic(bare);
-}
-
 export class VercelRouter implements ModelRouter {
+  private readonly registry: ProviderRegistry;
+
+  /** Pass user-configured providers (custom endpoints) to extend the built-ins. */
+  constructor(providers: ProviderConfig[] = []) {
+    this.registry = new ProviderRegistry(providers);
+  }
+
   async generateTurn(input: ModelTurnInput): Promise<ModelTurn> {
     const result = streamText({
-      model: resolveModel(input.model),
+      model: this.registry.resolve(input.model),
       system: input.system,
       messages: toModelMessages(input.messages),
       tools: input.tools ? toAiTools(input.tools) : undefined,

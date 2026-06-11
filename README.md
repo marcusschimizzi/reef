@@ -22,6 +22,12 @@ Set `ANTHROPIC_API_KEY` in `.env` (see `.env.example`). State lives in `./.reef`
 
 - `REEF_HTTP_PORT` (default `9876`), `REEF_API_KEY` — HTTP interface.
 - `REEF_HEARTBEAT_MINUTES` — opt-in self-maintenance heartbeat cadence (`0`/unset = off).
+- `REEF_MODEL` — model the default agent uses, as `provider/model` (a bare id is
+  Anthropic). Built-in providers: `anthropic`, `openai`, `ollama` (local, free —
+  `ollama/llama3.1`), `openrouter` (cheap — `openrouter/…`). Keys come from each
+  provider's conventional env var (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, …);
+  Ollama needs none. Custom OpenAI-compatible endpoints (Z.ai, etc.) are added via
+  config (coming next).
 - `REEF_LOG=off` — silence run-lifecycle logging.
 - `REEF_THEME`, `REEF_AVATAR` — TUI look (`teal` + `pixel` by default).
 

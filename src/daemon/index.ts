@@ -38,7 +38,9 @@ const DEFAULT_AGENT: AgentRecord = {
     "You can inspect your own operational state with list_runs, list_sessions, and " +
     "list_triggers. " +
     "Use the available tools when they help accomplish the task.",
-  model: "claude-opus-4-8",
+  // `provider/model` (e.g. ollama/llama3.1, openrouter/…) — bare id = Anthropic.
+  // Set REEF_MODEL to run dev on a cheap/free model; config supersedes this later.
+  model: process.env.REEF_MODEL || "claude-opus-4-8",
   toolAllowlist: [
     "echo",
     "get_time",
