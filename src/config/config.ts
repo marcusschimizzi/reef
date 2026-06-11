@@ -24,6 +24,17 @@ const providerSchema = z.object({
     .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "apiKeyEnv must be an environment variable name, not the key")
     .optional(),
   auth: z.enum(["bearer", "x-api-key"]).optional(),
+  // Per-model protocol routing under one provider/key (e.g. OpenCode Go).
+  overrides: z
+    .array(
+      z.object({
+        models: z.array(z.string()).min(1),
+        kind: z.enum(["anthropic", "openai", "openai-compatible"]).optional(),
+        baseURL: z.string().optional(),
+        auth: z.enum(["bearer", "x-api-key"]).optional(),
+      }),
+    )
+    .optional(),
 });
 
 // Surfaces: outbound channels (desktop notification, webhook). A webhook's URL
@@ -100,7 +111,14 @@ export type ConfigEdit =
   | { op: "unset"; key: ScalarKey }
   | {
       op: "provider-set";
-      provider: { id: string; kind: string; baseURL?: string; apiKeyEnv?: string; auth?: string };
+      provider: {
+        id: string;
+        kind: string;
+        baseURL?: string;
+        apiKeyEnv?: string;
+        auth?: string;
+        overrides?: unknown;
+      };
     }
   | { op: "provider-rm"; id: string };
 

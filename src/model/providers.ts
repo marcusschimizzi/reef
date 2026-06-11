@@ -30,6 +30,23 @@ export interface ProviderConfig {
    * always use Bearer regardless.
    */
   auth?: "bearer" | "x-api-key";
+  /**
+   * Per-model protocol overrides under the SAME provider (and the same key) —
+   * for a gateway that serves some models over one wire protocol and others over
+   * another (e.g. OpenCode Go: most models are OpenAI-compatible, a few speak the
+   * Anthropic protocol). The first override whose `models` includes the requested
+   * model wins; otherwise the provider defaults apply. So the user configures the
+   * provider once and reef routes each model to the right endpoint.
+   */
+  overrides?: ModelOverride[];
+}
+
+export interface ModelOverride {
+  /** Model ids this override applies to (exact match). */
+  models: string[];
+  kind?: ProviderKind;
+  baseURL?: string;
+  auth?: "bearer" | "x-api-key";
 }
 
 /** Built-in providers, wired from conventional env vars (no config needed). The
@@ -78,20 +95,34 @@ export class ProviderRegistry {
 
   resolve(modelId: string): LanguageModel {
     const { provider, model } = parseModelId(modelId);
-    return this.factoryFor(provider)(model);
-  }
-
-  private factoryFor(providerId: string): (model: string) => LanguageModel {
-    const cached = this.factories.get(providerId);
-    if (cached) return cached;
-    const config = this.configs.get(providerId);
+    const config = this.configs.get(provider);
     if (!config) {
-      throw new Error(`unknown model provider "${providerId}" — configure it in .reef/config.json`);
+      throw new Error(`unknown model provider "${provider}" — configure it in .reef/config.json`);
     }
-    const factory = build(config, this.secrets);
-    this.factories.set(providerId, factory);
-    return factory;
+    // Apply a per-model protocol override (same provider, same key, maybe a
+    // different kind/endpoint), then build/cache a factory for that effective shape.
+    const effective = withOverride(config, model);
+    const cacheKey = `${effective.id}|${effective.kind}|${effective.baseURL ?? ""}|${effective.auth ?? ""}`;
+    let factory = this.factories.get(cacheKey);
+    if (!factory) {
+      factory = build(effective, this.secrets);
+      this.factories.set(cacheKey, factory);
+    }
+    return factory(model);
   }
+}
+
+/** Merge the first matching model override over the provider's defaults. The key
+ *  (id/apiKey/apiKeyEnv) is unchanged, so all of a provider's models share a key. */
+export function withOverride(config: ProviderConfig, model: string): ProviderConfig {
+  const ov = config.overrides?.find((o) => o.models.includes(model));
+  if (!ov) return config;
+  return {
+    ...config,
+    kind: ov.kind ?? config.kind,
+    baseURL: ov.baseURL ?? config.baseURL,
+    auth: ov.auth ?? config.auth,
+  };
 }
 
 function apiKeyOf(c: ProviderConfig, secrets?: SecretStore): string | undefined {

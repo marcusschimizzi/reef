@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { ProviderRegistry, missingProviderKeys, parseModelId } from "../../src/model/providers.js";
+import { ProviderRegistry, missingProviderKeys, parseModelId, withOverride } from "../../src/model/providers.js";
+import { catalogEntry } from "../../src/model/catalog.js";
+import type { ProviderConfig } from "../../src/model/providers.js";
 
 describe("parseModelId", () => {
   it("splits on the first slash; the model may contain more (OpenRouter)", () => {
@@ -46,6 +48,29 @@ describe("ProviderRegistry", () => {
       { id: "openai", kind: "openai-compatible", baseURL: "https://proxy.local/v1", apiKey: "k" },
     ]);
     expect(r.resolve("openai/gpt-4o")).toBeDefined(); // resolves via the override
+  });
+
+  it("routes per-model via overrides: one provider, one key, right protocol", () => {
+    // the OpenCode Go catalog entry — most models openai-compatible, MiniMax/Qwen anthropic
+    const opencode = catalogEntry("opencode")!;
+    const config: ProviderConfig = {
+      id: "opencode",
+      kind: opencode.kind,
+      baseURL: opencode.baseURL,
+      apiKeyEnv: opencode.apiKeyEnv,
+      overrides: opencode.overrides,
+    };
+    // a GLM model keeps the provider default (openai-compatible)
+    expect(withOverride(config, "glm-5.1").kind).toBe("openai-compatible");
+    // a MiniMax/Qwen model is routed to the anthropic protocol + bearer, same key/baseURL
+    const minimax = withOverride(config, "minimax-m3");
+    expect(minimax).toMatchObject({ kind: "anthropic", auth: "bearer", apiKeyEnv: "OPENCODE_API_KEY" });
+    expect(minimax.baseURL).toBe(config.baseURL);
+
+    // and both resolve through one registry/provider without error
+    const r = new ProviderRegistry([config]);
+    expect(r.resolve("opencode/glm-5.1")).toBeDefined();
+    expect(r.resolve("opencode/minimax-m3")).toBeDefined();
   });
 
   it("resolves an anthropic-compatible gateway using bearer auth", () => {

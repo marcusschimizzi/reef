@@ -1,4 +1,4 @@
-import type { ProviderKind } from "./providers.js";
+import type { ModelOverride, ProviderKind } from "./providers.js";
 
 // The built-in provider catalog — presets that make `reef setup` a pick-from-a-
 // list flow instead of "type a base URL and guess the auth scheme". Each entry
@@ -20,6 +20,8 @@ export interface CatalogEntry {
   needsKey: boolean;
   /** A few model ids to suggest as the default. */
   sampleModels: string[];
+  /** Per-model protocol routing under one key (e.g. OpenCode Go). */
+  overrides?: ModelOverride[];
 }
 
 export const CATALOG: CatalogEntry[] = [
@@ -81,17 +83,16 @@ export const CATALOG: CatalogEntry[] = [
     baseURL: "https://opencode.ai/zen/go/v1",
     apiKeyEnv: "OPENCODE_API_KEY",
     needsKey: true,
-    sampleModels: ["glm-5.1", "kimi-k2.6", "deepseek-v4-pro"],
-  },
-  {
-    id: "opencode-anthropic",
-    label: "OpenCode Go (Anthropic-protocol models)",
-    kind: "anthropic",
-    baseURL: "https://opencode.ai/zen/go/v1",
-    auth: "bearer",
-    apiKeyEnv: "OPENCODE_API_KEY",
-    needsKey: true,
-    sampleModels: ["minimax-m3", "qwen3.7-max"],
+    // Most models are OpenAI-compatible; MiniMax/Qwen speak the Anthropic
+    // protocol at the same endpoint with the same key — routed automatically.
+    sampleModels: ["glm-5.1", "kimi-k2.6", "deepseek-v4-pro", "minimax-m3", "qwen3.7-max"],
+    overrides: [
+      {
+        models: ["minimax-m3", "minimax-m2.7", "minimax-m2.5", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus"],
+        kind: "anthropic",
+        auth: "bearer",
+      },
+    ],
   },
 ];
 

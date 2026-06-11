@@ -33,19 +33,18 @@
       "apiKeyEnv": "ZAI_API_KEY"
     },
     {
-      "$comment": "OpenCode Go (subscription gateway), OpenAI-compatible models. Models: glm-5.1, glm-5, kimi-k2.5, kimi-k2.6, deepseek-v4-pro, deepseek-v4-flash, mimo-v2.5, mimo-v2.5-pro. Key from opencode.ai/auth via OPENCODE_API_KEY. e.g. opencode/glm-5.1",
+      "$comment": "OpenCode Go (subscription gateway) — ONE provider, ONE key (OPENCODE_API_KEY from opencode.ai/auth). Most models are OpenAI-compatible (glm-5.1, kimi-k2.6, deepseek-v4-pro, mimo-v2.5, …); the `overrides` route MiniMax/Qwen to the Anthropic protocol automatically. Just use opencode/<model> — reef picks the right endpoint. e.g. opencode/glm-5.1 or opencode/minimax-m3",
       "id": "opencode",
       "kind": "openai-compatible",
       "baseURL": "https://opencode.ai/zen/go/v1",
-      "apiKeyEnv": "OPENCODE_API_KEY"
-    },
-    {
-      "$comment": "OpenCode Go — same gateway, its Anthropic-compatible models. Models: minimax-m3, minimax-m2.7, minimax-m2.5, qwen3.7-max, qwen3.7-plus, qwen3.6-plus. Same OPENCODE_API_KEY. auth:bearer because the gateway wants Authorization: Bearer, not Anthropic's x-api-key. e.g. opencode-anthropic/minimax-m3",
-      "id": "opencode-anthropic",
-      "kind": "anthropic",
-      "baseURL": "https://opencode.ai/zen/go/v1",
       "apiKeyEnv": "OPENCODE_API_KEY",
-      "auth": "bearer"
+      "overrides": [
+        {
+          "models": ["minimax-m3", "minimax-m2.7", "minimax-m2.5", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus"],
+          "kind": "anthropic",
+          "auth": "bearer"
+        }
+      ]
     }
   ]
 }

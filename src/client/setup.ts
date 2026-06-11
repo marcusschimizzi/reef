@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { reefHome } from "../core/paths.js";
 import { openSecretStore } from "../secrets/store.js";
 import { CATALOG, type CatalogEntry } from "../model/catalog.js";
-import type { ProviderKind } from "../model/providers.js";
+import type { ModelOverride, ProviderKind } from "../model/providers.js";
 import {
   applyConfigEdit,
   readRawConfig,
@@ -80,6 +80,7 @@ interface ProviderResult {
   baseURL?: string;
   auth?: "bearer" | "x-api-key";
   apiKeyEnv?: string;
+  overrides?: ModelOverride[];
   model: string;
   key?: string;
 }
@@ -118,6 +119,7 @@ async function main(): Promise<void> {
         baseURL: provider.baseURL,
         apiKeyEnv: provider.apiKeyEnv,
         auth: provider.auth,
+        overrides: provider.overrides,
       },
     };
     let next: Record<string, unknown>;
@@ -146,7 +148,16 @@ async function fromCatalog(p: Prompter, e: CatalogEntry): Promise<ProviderResult
   const baseURL = e.baseURL ? await p.ask("Base URL", e.baseURL) : undefined;
   const model = await p.ask("Model", e.sampleModels[0]);
   const key = e.needsKey ? await p.askHidden(`API key for ${e.label}`) : undefined;
-  return { id: e.id, kind: e.kind, baseURL, auth: e.auth, apiKeyEnv: e.apiKeyEnv, model, key: key || undefined };
+  return {
+    id: e.id,
+    kind: e.kind,
+    baseURL,
+    auth: e.auth,
+    apiKeyEnv: e.apiKeyEnv,
+    overrides: e.overrides,
+    model,
+    key: key || undefined,
+  };
 }
 
 async function fromScratch(p: Prompter): Promise<ProviderResult | undefined> {
