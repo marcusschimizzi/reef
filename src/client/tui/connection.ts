@@ -1,5 +1,6 @@
 import net from "node:net";
 import type { ReefEvent } from "../../protocol/events.js";
+import type { SessionSummary } from "../../core/types.js";
 import type { ControlRequest } from "../../daemon/socket.js";
 
 // The TUI's link to the daemon: newline-JSON over the unix socket — the same
@@ -12,6 +13,10 @@ export interface ConnectionHandlers {
   onEvent: (event: ReefEvent) => void;
   onError: (message: string) => void;
   onStatus: (status: ConnStatus) => void;
+  /** Snapshot of all sessions (response to listSessions). */
+  onSessions?: (sessions: SessionSummary[]) => void;
+  /** A session's replayed event history (response to history). */
+  onHistory?: (sessionKey: string, events: ReefEvent[]) => void;
 }
 
 export class Connection {
@@ -46,12 +51,23 @@ export class Connection {
       } catch {
         continue;
       }
-      const maybeErr = parsed as { kind?: string; error?: string };
-      if (maybeErr?.kind === "error") {
-        this.handlers.onError(String(maybeErr.error ?? "unknown error"));
-        continue;
+      // Server → client messages carry a `kind`; live native events do not.
+      const tagged = parsed as { kind?: string; error?: string };
+      switch (tagged.kind) {
+        case "error":
+          this.handlers.onError(String(tagged.error ?? "unknown error"));
+          continue;
+        case "sessions":
+          this.handlers.onSessions?.((parsed as { sessions: SessionSummary[] }).sessions);
+          continue;
+        case "history": {
+          const h = parsed as { sessionKey: string; events: ReefEvent[] };
+          this.handlers.onHistory?.(h.sessionKey, h.events);
+          continue;
+        }
+        default:
+          this.handlers.onEvent(parsed as ReefEvent);
       }
-      this.handlers.onEvent(parsed as ReefEvent);
     }
   }
 
@@ -67,6 +83,12 @@ export class Connection {
   }
   stop(sessionKey: string): void {
     this.write({ kind: "stop", sessionKey });
+  }
+  listSessions(): void {
+    this.write({ kind: "list_sessions" });
+  }
+  history(sessionKey: string): void {
+    this.write({ kind: "history", sessionKey });
   }
   close(): void {
     this.sock.end();

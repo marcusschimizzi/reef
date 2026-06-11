@@ -150,7 +150,8 @@ export class ConchProjector {
         // approval.requested (if any) already fired; the UI is no longer "typing"
         return [this.typing(event, "stop")];
 
-      // Dropped in the down-projection — conch has no slot yet:
+      // Dropped in the down-projection — conch has no slot yet (or renders it
+      // itself): message.received (conch shows the user's own input),
       // step.started, message.completed, tool.started, approval.resolved,
       // context.compacted, memory.recalled, memory.recorded, budget.warning.
       // (context.compacted is first-class in the native stream and shown by the

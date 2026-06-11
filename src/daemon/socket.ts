@@ -11,7 +11,11 @@ import type { Daemon } from "./Daemon.js";
 export type ControlRequest =
   | { kind: "send"; sessionKey: string; agentId?: string; message: string }
   | { kind: "resolve"; approvalId: string; decision: string }
-  | { kind: "stop"; sessionKey: string };
+  | { kind: "stop"; sessionKey: string }
+  // sessions view (Phase 4c TUI): snapshot the session list, or replay one
+  // session's event history to rebuild its transcript on open.
+  | { kind: "list_sessions" }
+  | { kind: "history"; sessionKey: string };
 
 export function startSocketServer(
   daemon: Daemon,
@@ -79,6 +83,14 @@ function handleLine(
       break;
     case "stop":
       daemon.cancel(req.sessionKey);
+      break;
+    case "list_sessions":
+      sock.write(`${JSON.stringify({ kind: "sessions", sessions: daemon.listSessions() })}\n`);
+      break;
+    case "history":
+      sock.write(
+        `${JSON.stringify({ kind: "history", sessionKey: req.sessionKey, events: daemon.getHistory(req.sessionKey) })}\n`,
+      );
       break;
   }
 }

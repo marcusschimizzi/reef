@@ -12,6 +12,8 @@ import type {
   Role,
   Run,
   RunStatus,
+  SessionStatus,
+  SessionSummary,
   Step,
   StepState,
   StopReason,
@@ -171,6 +173,60 @@ export class Spine {
          VALUES (?, ?, ?)`,
       )
       .run(sessionKey, agentId, nowIso());
+  }
+
+  /**
+   * A denormalized view of every session for the sessions list (Phase 4c TUI).
+   * Computed on demand — most-recently-active first — by combining each
+   * session's latest run, pending approvals, and first/last messages. Cheap at
+   * v1 scale (a handful of small queries per session); not a hot path.
+   */
+  listSessions(): SessionSummary[] {
+    const rows = this.db
+      .prepare(`SELECT session_key, agent_id, created_at FROM sessions`)
+      .all() as Array<{ session_key: string; agent_id: string; created_at: string }>;
+    return rows
+      .map((r) => this.summarizeSession(r.session_key, r.agent_id, r.created_at))
+      .sort((a, b) => (a.lastActivityAt < b.lastActivityAt ? 1 : -1));
+  }
+
+  private summarizeSession(
+    sessionKey: string,
+    agentId: string,
+    createdAt: string,
+  ): SessionSummary {
+    const latestRun = this.db
+      .prepare(`SELECT status, stop_reason FROM runs WHERE session_key = ? ORDER BY started_at DESC LIMIT 1`)
+      .get(sessionKey) as { status: string; stop_reason: string | null } | undefined;
+    const status = deriveSessionStatus(latestRun);
+    const { p } = this.db
+      .prepare(`SELECT COUNT(*) AS p FROM approvals WHERE session_key = ? AND status = 'pending'`)
+      .get(sessionKey) as { p: number };
+    const oldestPending = this.db
+      .prepare(`SELECT id FROM approvals WHERE session_key = ? AND status = 'pending' ORDER BY created_at ASC LIMIT 1`)
+      .get(sessionKey) as { id: string } | undefined;
+    const firstUser = this.db
+      .prepare(`SELECT content FROM messages WHERE session_key = ? AND role = 'user' ORDER BY seq ASC LIMIT 1`)
+      .get(sessionKey) as { content: string } | undefined;
+    const lastAsst = this.db
+      .prepare(`SELECT content FROM messages WHERE session_key = ? AND role = 'assistant' ORDER BY seq DESC LIMIT 1`)
+      .get(sessionKey) as { content: string } | undefined;
+    const { m } = this.db
+      .prepare(`SELECT MAX(created_at) AS m FROM messages WHERE session_key = ?`)
+      .get(sessionKey) as { m: string | null };
+
+    const previewText = lastAsst ? textOfBlocks(lastAsst.content) : "";
+    return {
+      sessionKey,
+      agentId,
+      status,
+      title: firstUser ? textOfBlocks(firstUser.content) : "(no messages yet)",
+      preview: previewText || sessionStatusNote(status),
+      pendingApprovals: p,
+      pendingApprovalId: oldestPending?.id,
+      lastActivityAt: m ?? createdAt,
+      createdAt,
+    };
   }
 
   // ── messages (the canonical conversation) ──────────────────────────────────
@@ -595,6 +651,41 @@ export class Spine {
       .all(sessionKey, sinceSeq) as Array<{ payload: string }>;
     return rows.map((r) => JSON.parse(r.payload) as ReefEvent);
   }
+}
+
+/** Map a session's latest run to its list-view status. */
+function deriveSessionStatus(
+  latestRun: { status: string; stop_reason: string | null } | undefined,
+): SessionStatus {
+  if (!latestRun) return "idle";
+  if (latestRun.status === "running") return "working";
+  if (latestRun.status === "suspended") return "awaiting_approval";
+  if (latestRun.status === "failed") return "failed";
+  return "idle";
+}
+
+function sessionStatusNote(status: SessionStatus): string {
+  switch (status) {
+    case "working":
+      return "working…";
+    case "awaiting_approval":
+      return "awaiting approval";
+    case "failed":
+      return "failed";
+    case "idle":
+      return "idle";
+  }
+}
+
+/** Flatten a stored ContentBlock[] JSON to its text, whitespace-collapsed. */
+function textOfBlocks(contentJson: string): string {
+  const blocks = JSON.parse(contentJson) as ContentBlock[];
+  return blocks
+    .filter((b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text")
+    .map((b) => b.text)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function rowToRun(row: RunRow): Run {

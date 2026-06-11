@@ -41,7 +41,12 @@ export type ReefEvent = EventEnvelope &
     | { type: "run.resumed" }
     | { type: "run.completed"; stopReason: StopReason }
     | { type: "run.failed"; error: string }
-    // ── model output ───────────────────────────────────────────────────────
+    // ── input & model output ─────────────────────────────────────────────────
+    // The turn that started a run — a user message, or a trigger's seeded
+    // instruction. Persisted so a session's transcript can be rebuilt on open
+    // (the canonical user turn lives in `messages`, but the event log is what
+    // consumers replay). conch drops it: it renders the user's own input.
+    | { type: "message.received"; text: string; source?: RunSource }
     | { type: "message.delta"; text: string }
     | { type: "thinking.delta"; text: string }
     | { type: "message.completed"; content: ContentBlock[] }

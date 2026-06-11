@@ -2,7 +2,7 @@ import type { ReefEvent } from "../../protocol/events.js";
 import type { ContentBlock } from "../../core/types.js";
 
 /** Concatenate the text blocks of a completed turn — the authoritative message. */
-function textOf(content: ContentBlock[]): string {
+export function textOf(content: ContentBlock[]): string {
   return content
     .filter((b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text")
     .map((b) => b.text)
@@ -115,6 +115,11 @@ export function reduceEvent(state: TranscriptState, event: ReefEvent): Transcrip
 
     case "run.resumed":
       return { ...state, status: "working" };
+
+    case "message.received":
+      // The turn that started the run (user message or trigger instruction) —
+      // the single source of the user line, live and on history replay.
+      return push(state, { kind: "user", text: event.text });
 
     case "thinking.delta": {
       const last = state.items.at(-1);

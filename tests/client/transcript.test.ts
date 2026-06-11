@@ -142,6 +142,16 @@ describe("transcript reducer", () => {
     expect(splitTranscript(tool.items).live[0]).toMatchObject({ kind: "tool", status: "pending" });
   });
 
+  it("renders the run's seeding turn (message.received) as a user item", () => {
+    const s = run(
+      ev({ type: "message.received", text: "what's my name?" }),
+      ev({ type: "run.started", agentId: "reef" }),
+      ev({ type: "message.delta", text: "It's Marcus" }),
+    );
+    expect(kinds(s)).toEqual(["user", "assistant"]);
+    expect(lastOf(s, "user").text).toBe("what's my name?");
+  });
+
   it("supports local user + notice items", () => {
     const s = pushNotice(pushUser(initialState, "hi reef"), "a note");
     expect(kinds(s)).toEqual(["user", "notice"]);

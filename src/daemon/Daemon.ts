@@ -10,6 +10,7 @@ import type {
   Run,
   RunSource,
   RunStatus,
+  SessionSummary,
   Trigger,
   TriggerOrigin,
   TriggerSpec,
@@ -24,6 +25,7 @@ import { DefaultGate, type ProactiveGate } from "../triggers/gate.js";
 import { Scheduler, DEFAULT_TICK_MS } from "./Scheduler.js";
 import { VercelRouter, type ModelRouter } from "../model/router.js";
 import type { MemoryStore } from "../memory/seam.js";
+import type { ReefEvent } from "../protocol/events.js";
 import { SqliteMemory } from "../memory/sqlite.js";
 import { builtinTools } from "../tools/builtins.js";
 import { fileTools } from "../tools/files.js";
@@ -240,7 +242,17 @@ export class Daemon {
     return this.spine.listTriggers(agentId);
   }
 
-  // ── runs (observability) ────────────────────────────────────────────────────
+  // ── sessions & runs (observability / the sessions view) ─────────────────────
+  /** Every session as a list-view summary, most recently active first. */
+  listSessions(): SessionSummary[] {
+    return this.spine.listSessions();
+  }
+
+  /** A session's full native event log — replayed to rebuild its transcript. */
+  getHistory(sessionKey: string): ReefEvent[] {
+    return this.spine.getEventsSince(sessionKey, 0);
+  }
+
   /** Recent runs, optionally filtered by status (most recent first). */
   listRuns(opts: { status?: RunStatus; limit?: number } = {}): Run[] {
     return this.spine.listRuns(opts);
@@ -349,6 +361,12 @@ export class Daemon {
       agentId: wake.agentId,
       sessionKey: wake.sessionKey,
     });
+    this.sink.emit({
+      type: "message.received",
+      text: wake.message,
+      sessionKey: wake.sessionKey,
+      runId: run.id,
+    });
     await this.runLoop(run);
   }
 
@@ -366,9 +384,19 @@ export class Daemon {
       agentId: trigger.agentId,
       sessionKey: trigger.sessionKey,
     });
-    await this.runLoop(run, {
-      source: { kind: "trigger", triggerId: trigger.id, triggerType: trigger.type },
+    const source: RunSource = {
+      kind: "trigger",
+      triggerId: trigger.id,
+      triggerType: trigger.type,
+    };
+    this.sink.emit({
+      type: "message.received",
+      text: trigger.input,
+      source,
+      sessionKey: trigger.sessionKey,
+      runId: run.id,
     });
+    await this.runLoop(run, { source });
   }
 
   private async resumeRun(runId: string): Promise<void> {

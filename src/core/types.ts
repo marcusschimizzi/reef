@@ -195,6 +195,35 @@ export interface Trigger {
   createdAt: string;
 }
 
+/**
+ * A session's status, derived from its latest run — the grouping key for the
+ * TUI's sessions view. `awaiting_approval` is the surface for runs parked for a
+ * human decision; `idle` covers completed/never-run sessions.
+ */
+export type SessionStatus = "working" | "awaiting_approval" | "idle" | "failed";
+
+/**
+ * A denormalized, read-only view of a session for the sessions list (a TUI/conch
+ * concern, not part of the loop). Computed on demand from sessions + runs +
+ * messages + approvals; never persisted.
+ */
+export interface SessionSummary {
+  sessionKey: string;
+  agentId: string;
+  status: SessionStatus;
+  /** Human title — the session's first user message (for a trigger, its instruction). */
+  title: string;
+  /** Subtitle — the latest assistant line, or a status note. */
+  preview: string;
+  /** Pending approvals across the session's runs (drives the "awaiting" badge). */
+  pendingApprovals: number;
+  /** The oldest pending approval's id, if any — lets the list approve in place. */
+  pendingApprovalId?: string;
+  /** ISO-8601 of the most recent activity (last message, else session creation). */
+  lastActivityAt: string;
+  createdAt: string;
+}
+
 export type StepState = "pending" | "committed";
 
 /**

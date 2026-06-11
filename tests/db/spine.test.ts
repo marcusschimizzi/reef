@@ -120,4 +120,45 @@ describe("Spine", () => {
     expect(spine.getInterruptedRuns()).toEqual([]);
     spine.close();
   });
+
+  it("summarizes sessions for the sessions view (title, preview, status, approvals)", () => {
+    const spine = new Spine(tempDbPath());
+    spine.upsertAgent(agent);
+
+    // a finished interactive session
+    spine.ensureSession("s_done", agent.id);
+    spine.appendMessage("s_done", "user", [{ type: "text", text: "what's my name?" }]);
+    spine.appendMessage("s_done", "assistant", [{ type: "text", text: "It's Marcus" }]);
+    const done = spine.createRun({ id: "run_done", agentId: agent.id, sessionKey: "s_done" });
+    spine.setRunStatus(done.id, "completed", { stopReason: "completed" });
+
+    // a session parked awaiting approval
+    spine.ensureSession("s_wait", agent.id);
+    spine.appendMessage("s_wait", "user", [{ type: "text", text: "run a deploy" }]);
+    const wait = spine.createRun({ id: "run_wait", agentId: agent.id, sessionKey: "s_wait" });
+    spine.setRunStatus(wait.id, "suspended", { stopReason: "awaiting_approval" });
+    spine.createApproval({
+      id: "apr_1",
+      runId: wait.id,
+      sessionKey: "s_wait",
+      toolUseId: "t1",
+      toolName: "shell",
+      input: { command: "deploy" },
+    });
+
+    const byKey = Object.fromEntries(spine.listSessions().map((s) => [s.sessionKey, s]));
+    expect(byKey.s_done).toMatchObject({
+      status: "idle",
+      title: "what's my name?",
+      preview: "It's Marcus",
+      pendingApprovals: 0,
+    });
+    expect(byKey.s_wait).toMatchObject({
+      status: "awaiting_approval",
+      title: "run a deploy",
+      pendingApprovals: 1,
+      pendingApprovalId: "apr_1",
+    });
+    spine.close();
+  });
 });
