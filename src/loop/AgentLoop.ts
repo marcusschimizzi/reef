@@ -1,4 +1,4 @@
-import { newApprovalId } from "../core/ids.js";
+import { newActionId, newApprovalId } from "../core/ids.js";
 import { nowIso } from "../core/time.js";
 import type {
   AgentRecord,
@@ -10,6 +10,7 @@ import type {
 } from "../core/types.js";
 import type { Spine } from "../db/spine.js";
 import type { ModelRouter } from "../model/router.js";
+import { DefaultPolicy, type ApprovalPolicy, type PolicyDecision } from "../policy/policy.js";
 import type { EmitFn, ReefEventBody, ReefEventInit } from "../protocol/events.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolContext } from "../tools/types.js";
@@ -26,6 +27,8 @@ export interface LoopDeps {
   maxSteps?: number;
   /** Context-compaction policy (Phase 3c); omit for the competent default. */
   compaction?: CompactionPolicy;
+  /** Approval policy governing tool calls; omit for the behavior-preserving default. */
+  policy?: ApprovalPolicy;
 }
 
 export interface LoopOptions {
@@ -57,12 +60,20 @@ export async function runAgentLoop(
 ): Promise<StopReason> {
   const { spine, router, tools, toolContext } = deps;
   const maxSteps = deps.maxSteps ?? 20;
-  // A proactive run (trigger/heartbeat) has no human attached to its session, so
-  // a gated tool can't be approved — suspending would deadlock forever. Instead
-  // such runs auto-deny gated tools and continue (the dangerous tool still never
-  // runs unattended). The end state is to route the approval request out to a
-  // human surface; until then, deny-and-continue. See reef-proactive-approval.
-  const proactive = options.source?.kind === "trigger";
+  const policy = deps.policy ?? new DefaultPolicy();
+  // How this run started feeds the policy: an interactive run can suspend for a
+  // human, a proactive (trigger) run has no approver so the default policy denies
+  // a gated tool rather than deadlocking. See reef-proactive-approval.
+  const source: RunSource = options.source ?? { kind: "message" };
+  const decide = (call: ToolUse): PolicyDecision =>
+    policy.decide({
+      agentId: agent.id,
+      toolName: call.name,
+      needsApproval: tools.get(call.name)?.needsApproval ?? false,
+      input: call.input,
+      source,
+      sessionKey: run.sessionKey,
+    });
 
   const emit = (body: ReefEventBody): void =>
     deps.emit({ ...body, sessionKey: run.sessionKey, runId: run.id } as ReefEventInit);
@@ -81,7 +92,7 @@ export async function runAgentLoop(
     // Resume preamble: finish the suspended turn whose tools were just decided.
     if (options.resumeApproval) {
       if (spine.pendingApprovalCount(run.id) > 0) return "awaiting_approval";
-      if (await finishSuspendedTurn(run, deps, emit, index)) index++;
+      if (await finishSuspendedTurn(run, deps, emit, index, source, policy)) index++;
     }
 
     while (true) {
@@ -127,11 +138,11 @@ export async function runAgentLoop(
         (b): b is ToolUse => b.type === "tool_use",
       );
 
-      // Suspend the whole turn if any tool in it needs approval — unless the run
-      // is proactive, in which case gated tools are auto-denied in executeTools
-      // (no approver exists) and the run continues rather than deadlocking.
-      const gated = toolUses.filter((c) => tools.get(c.name)?.needsApproval);
-      if (gated.length > 0 && !proactive) {
+      // Suspend the whole turn if the policy gates any tool in it. (A policy that
+      // denies — e.g. for a proactive run — yields no gated calls here; those are
+      // refused in executeTools and the run continues rather than deadlocking.)
+      const gated = toolUses.filter((c) => decide(c).action === "gate");
+      if (gated.length > 0) {
         spine.updateStepOutput(run.id, index, {
           response: turn.content,
           usage: turn.usage,
@@ -160,7 +171,7 @@ export async function runAgentLoop(
 
       let toolResults: ContentBlock[] | undefined;
       if (turn.stop === "tool_use" && toolUses.length > 0) {
-        toolResults = await executeTools(toolUses, run, deps, emit, proactive);
+        toolResults = await executeTools(toolUses, run, deps, emit, source, policy);
         spine.appendMessage(run.sessionKey, "tool", toolResults, run.id);
       }
 
@@ -194,18 +205,19 @@ export async function runAgentLoop(
 }
 
 /**
- * Execute a turn's tool calls. Gated calls are governed by their durable
- * approval decision: denied → a denial result fed back to the model; allowed or
- * ungated → run. In a proactive run a gated call has no approver, so it is
- * auto-denied with a message that tells the model to proceed without it. An
- * errored tool is an input to the loop, not a run failure.
+ * Execute a turn's tool calls under the approval policy, recording each to the
+ * audit log. A `gate` call honors its durable human approval (allowed → run,
+ * denied/undecided → denial); a `deny` call (e.g. a proactive run) is refused
+ * with a model-readable reason; `allow` runs. An errored tool is an input to the
+ * loop, not a run failure.
  */
 async function executeTools(
   toolUses: ToolUse[],
   run: Run,
   deps: LoopDeps,
   emit: (body: ReefEventBody) => void,
-  proactive = false,
+  source: RunSource,
+  policy: ApprovalPolicy,
 ): Promise<ContentBlock[]> {
   const { spine, tools, toolContext } = deps;
   const approvals = new Map(
@@ -213,9 +225,22 @@ async function executeTools(
   );
   const results: ContentBlock[] = [];
 
+  const denial = (call: ToolUse, message: string, decision: PolicyDecision): void => {
+    emit({ type: "tool.failed", toolUseId: call.id, error: message });
+    results.push({ type: "tool_result", toolUseId: call.id, output: message, isError: true });
+    record(spine, run, call, decision.action, "denied", message);
+  };
+
   for (const call of toolUses) {
     const tool = tools.get(call.name);
-    const approval = approvals.get(call.id);
+    const decision = policy.decide({
+      agentId: run.agentId,
+      toolName: call.name,
+      needsApproval: tool?.needsApproval ?? false,
+      input: call.input,
+      source,
+      sessionKey: run.sessionKey,
+    });
     emit({
       type: "tool.requested",
       toolUseId: call.id,
@@ -224,22 +249,17 @@ async function executeTools(
       needsApproval: tool?.needsApproval ?? false,
     });
 
-    // Proactive auto-deny: a gated tool in an unattended run, with no explicit
-    // approval, can't run — feed back a denial the model can adapt to.
-    if (proactive && tool?.needsApproval && approval?.status !== "allowed") {
-      const message =
-        "Approval required, but this run was started by a trigger with no human " +
-        "available to approve it — treated as denied. Continue without this tool.";
-      emit({ type: "tool.failed", toolUseId: call.id, error: message });
-      results.push({ type: "tool_result", toolUseId: call.id, output: message, isError: true });
+    if (decision.action === "deny") {
+      denial(call, decision.reason ?? "This action was denied by policy.", decision);
       continue;
     }
-
-    if (approval?.status === "denied") {
-      const message = "The user denied this action.";
-      emit({ type: "tool.failed", toolUseId: call.id, error: message });
-      results.push({ type: "tool_result", toolUseId: call.id, output: message, isError: true });
-      continue;
+    if (decision.action === "gate") {
+      // Resolved by the durable human approval recorded while suspended.
+      const approval = approvals.get(call.id);
+      if (approval?.status !== "allowed") {
+        denial(call, "The user denied this action.", decision);
+        continue;
+      }
     }
 
     emit({ type: "tool.started", toolUseId: call.id });
@@ -248,13 +268,38 @@ async function executeTools(
       const output = await tool.run(call.input, toolContext);
       emit({ type: "tool.completed", toolUseId: call.id, output });
       results.push({ type: "tool_result", toolUseId: call.id, output });
+      record(spine, run, call, decision.action, "ok");
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       emit({ type: "tool.failed", toolUseId: call.id, error: message });
       results.push({ type: "tool_result", toolUseId: call.id, output: message, isError: true });
+      record(spine, run, call, decision.action, "error", message);
     }
   }
   return results;
+}
+
+/** Write one audit row for a tool-execution attempt. */
+function record(
+  spine: Spine,
+  run: Run,
+  call: ToolUse,
+  decision: PolicyDecision["action"],
+  outcome: "ok" | "error" | "denied",
+  reason?: string,
+): void {
+  spine.recordAction({
+    id: newActionId(),
+    runId: run.id,
+    sessionKey: run.sessionKey,
+    agentId: run.agentId,
+    toolName: call.name,
+    input: call.input,
+    decision,
+    reason,
+    outcome,
+    createdAt: nowIso(),
+  });
 }
 
 /** Execute and commit the pending (suspended) turn after approvals resolved. */
@@ -263,13 +308,15 @@ async function finishSuspendedTurn(
   deps: LoopDeps,
   emit: (body: ReefEventBody) => void,
   index: number,
+  source: RunSource,
+  policy: ApprovalPolicy,
 ): Promise<boolean> {
   const { spine } = deps;
   const pending = spine.getSteps(run.id).find((s) => s.state === "pending");
   if (!pending?.response) return false;
 
   const toolUses = pending.response.filter((b): b is ToolUse => b.type === "tool_use");
-  const toolResults = await executeTools(toolUses, run, deps, emit);
+  const toolResults = await executeTools(toolUses, run, deps, emit, source, policy);
   spine.appendMessage(run.sessionKey, "tool", toolResults, run.id);
   spine.commitStep(run.id, pending.index, {
     response: pending.response,

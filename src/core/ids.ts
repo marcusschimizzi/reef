@@ -6,3 +6,4 @@ export const newApprovalId = (): string => `apr_${randomUUID()}`;
 export const newToolUseId = (): string => `tool_${randomUUID()}`;
 export const newMemoryId = (): string => `mem_${randomUUID()}`;
 export const newTriggerId = (): string => `trg_${randomUUID()}`;
+export const newActionId = (): string => `act_${randomUUID()}`;

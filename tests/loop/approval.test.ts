@@ -109,6 +109,10 @@ describe("suspend-for-approval", () => {
       output: { ran: true },
     });
     expect(spine.getRun("run_g")?.status).toBe("completed");
+    // audited: the gated call ran after approval
+    expect(spine.listActions({ runId: "run_g" })).toMatchObject([
+      { toolName: "danger", decision: "gate", outcome: "ok" },
+    ]);
     spine.close();
   });
 
@@ -150,6 +154,10 @@ describe("suspend-for-approval", () => {
     const toolMsg = spine.getMessages("s1").find((m) => m.role === "tool");
     expect(toolMsg?.content[0]).toMatchObject({ isError: true });
     expect((toolMsg?.content[0] as { output: string }).output).toMatch(/no human available/);
+    // audited: a policy denial, recorded
+    expect(spine.listActions({ runId: "run_pro" })).toMatchObject([
+      { toolName: "danger", decision: "deny", outcome: "denied" },
+    ]);
     spine.close();
   });
 

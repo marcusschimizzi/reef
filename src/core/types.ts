@@ -224,6 +224,29 @@ export interface SessionSummary {
   createdAt: string;
 }
 
+/**
+ * A durable audit record of one tool-execution attempt (the recorded-authority
+ * substrate). Every tool call the loop runs writes one of these with the policy
+ * decision that governed it and how it turned out — so "what did this agent do,
+ * what was allowed, and why" is a query, not a scrollback. The broker's fs leases
+ * and richer tracing extend this same log later.
+ */
+export interface Action {
+  id: string;
+  runId: string;
+  sessionKey: string;
+  agentId: string;
+  toolName: string;
+  input: unknown;
+  /** What the approval policy decided for this call. */
+  decision: "allow" | "gate" | "deny";
+  /** Why, when it matters (a denial rationale; the matched rule later). */
+  reason?: string;
+  /** How the attempt resolved. */
+  outcome: "ok" | "error" | "denied";
+  createdAt: string;
+}
+
 export type StepState = "pending" | "committed";
 
 /**

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { newRunId, newTriggerId } from "../core/ids.js";
 import { nowIso } from "../core/time.js";
 import type {
+  Action,
   AgentRecord,
   Approval,
   ApprovalStatus,
@@ -22,6 +23,8 @@ import { runAgentLoop, type LoopOptions } from "../loop/AgentLoop.js";
 import { assertValidSpec, nextFireTime } from "../triggers/schedule.js";
 import { DaemonScheduler, triggerSessionKey } from "../triggers/capability.js";
 import { DefaultGate, type ProactiveGate } from "../triggers/gate.js";
+import { DefaultPolicy, type ApprovalPolicy } from "../policy/policy.js";
+import { DaemonIntrospection } from "../introspect/capability.js";
 import { Scheduler, DEFAULT_TICK_MS } from "./Scheduler.js";
 import { VercelRouter, type ModelRouter } from "../model/router.js";
 import type { MemoryStore } from "../memory/seam.js";
@@ -32,6 +35,7 @@ import { fileTools } from "../tools/files.js";
 import { shellTools } from "../tools/shell.js";
 import { memoryTools } from "../tools/memory.js";
 import { scheduleTools } from "../tools/schedule.js";
+import { introspectTools } from "../tools/introspect.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { EventSink } from "./sink.js";
 import { Inbox } from "./inbox.js";
@@ -52,6 +56,8 @@ export interface DaemonOptions {
   tickMs?: number;
   /** Proactive gate governing heartbeat fires; defaults to idle-only (DefaultGate). */
   gate?: ProactiveGate;
+  /** Approval policy for tool calls; defaults to the behavior-preserving DefaultPolicy. */
+  policy?: ApprovalPolicy;
 }
 
 /** Default self-maintenance instruction for a heartbeat trigger (Phase 4b). */
@@ -100,6 +106,7 @@ export class Daemon {
   private readonly memories = new Map<string, MemoryStore>();
   private readonly scheduler: Scheduler;
   private readonly gate: ProactiveGate;
+  private readonly policy: ApprovalPolicy;
   /** Abort handles for in-flight runs, keyed by session — powers cancellation. */
   private readonly aborters = new Map<string, AbortController>();
 
@@ -111,6 +118,7 @@ export class Daemon {
     this.maxSteps = opts.maxSteps ?? 20;
     this.scheduler = new Scheduler(() => this.tickTriggers(), opts.tickMs ?? DEFAULT_TICK_MS);
     this.gate = opts.gate ?? new DefaultGate();
+    this.policy = opts.policy ?? new DefaultPolicy();
     // Default memory: the SQLite/FTS5 store sharing the spine's connection,
     // scoped per agent so agents never see each other's memory.
     this.memoryFactory =
@@ -122,6 +130,7 @@ export class Daemon {
       ...shellTools,
       ...memoryTools,
       ...scheduleTools,
+      ...introspectTools,
     ]) {
       this.tools.register(tool);
     }
@@ -256,6 +265,11 @@ export class Daemon {
   /** Recent runs, optionally filtered by status (most recent first). */
   listRuns(opts: { status?: RunStatus; limit?: number } = {}): Run[] {
     return this.spine.listRuns(opts);
+  }
+
+  /** The recorded-authority audit log — recent tool actions, newest first. */
+  listActions(opts: { runId?: string; agentId?: string; limit?: number } = {}): Action[] {
+    return this.spine.listActions(opts);
   }
 
   /**
@@ -427,11 +441,13 @@ export class Daemon {
           spine: this.spine,
           router: this.router,
           tools: this.tools,
+          policy: this.policy,
           toolContext: {
             fs: new BoundFs(root),
             workspaceRoot: root,
             memory: this.memoryFor(agent.id),
             scheduler: new DaemonScheduler(this.spine, agent.id),
+            introspection: new DaemonIntrospection(this.spine, agent.id),
             signal: aborter.signal,
           },
           emit: this.sink.emit,

@@ -91,6 +91,12 @@ async function handle(
     }
   }
 
+  if (method === "GET" && path === "/v1/actions") {
+    const runId = url.searchParams.get("runId") || undefined;
+    const agentId = url.searchParams.get("agentId") || undefined;
+    return sendJson(res, 200, { ok: true, actions: daemon.listActions({ runId, agentId }) });
+  }
+
   if (method === "GET" && path === "/v1/runs") {
     const status = url.searchParams.get("status");
     if (status === "awaiting_approval") {

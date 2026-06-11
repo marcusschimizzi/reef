@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import { applySchema } from "./schema.js";
 import { nowIso } from "../core/time.js";
 import type {
+  Action,
   AgentRecord,
   Approval,
   ApprovalStatus,
@@ -101,6 +102,19 @@ interface ApprovalRow {
   decision: string | null;
   created_at: string;
   decided_at: string | null;
+}
+
+interface ActionRow {
+  id: string;
+  run_id: string;
+  session_key: string;
+  agent_id: string;
+  tool_name: string;
+  input: string;
+  decision: string;
+  reason: string | null;
+  outcome: string;
+  created_at: string;
 }
 
 const json = (v: unknown): string => JSON.stringify(v);
@@ -619,6 +633,49 @@ export class Spine {
     return c;
   }
 
+  // ── actions (the recorded-authority audit log) ──────────────────────────────
+  recordAction(a: Action): void {
+    this.db
+      .prepare(
+        `INSERT INTO actions (id, run_id, session_key, agent_id, tool_name, input,
+            decision, reason, outcome, created_at)
+         VALUES (@id, @run_id, @session_key, @agent_id, @tool_name, @input,
+            @decision, @reason, @outcome, @created_at)`,
+      )
+      .run({
+        id: a.id,
+        run_id: a.runId,
+        session_key: a.sessionKey,
+        agent_id: a.agentId,
+        tool_name: a.toolName,
+        input: json(a.input),
+        decision: a.decision,
+        reason: a.reason ?? null,
+        outcome: a.outcome,
+        created_at: a.createdAt,
+      });
+  }
+
+  /** Recent audit actions, newest first; optionally scoped to a run or agent. */
+  listActions(opts: { runId?: string; agentId?: string; limit?: number } = {}): Action[] {
+    const limit = opts.limit ?? 100;
+    const where: string[] = [];
+    const params: Record<string, string | number> = { limit };
+    if (opts.runId) {
+      where.push("run_id = @runId");
+      params.runId = opts.runId;
+    }
+    if (opts.agentId) {
+      where.push("agent_id = @agentId");
+      params.agentId = opts.agentId;
+    }
+    const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    const rows = this.db
+      .prepare(`SELECT * FROM actions ${clause} ORDER BY created_at DESC LIMIT @limit`)
+      .all(params) as ActionRow[];
+    return rows.map(rowToAction);
+  }
+
   // ── events (native protocol log; consumer reconnect — Phase 2) ──────────────
   appendEvent(event: ReefEvent): void {
     this.db
@@ -729,6 +786,21 @@ function rowToTrigger(row: TriggerRow): Trigger {
     catchUpPolicy: row.catch_up_policy as CatchUpPolicy,
     nextFireAt: row.next_fire_at ?? undefined,
     lastFiredAt: row.last_fired_at ?? undefined,
+    createdAt: row.created_at,
+  };
+}
+
+function rowToAction(row: ActionRow): Action {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    sessionKey: row.session_key,
+    agentId: row.agent_id,
+    toolName: row.tool_name,
+    input: JSON.parse(row.input),
+    decision: row.decision as Action["decision"],
+    reason: row.reason ?? undefined,
+    outcome: row.outcome as Action["outcome"],
     createdAt: row.created_at,
   };
 }

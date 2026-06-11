@@ -32,6 +32,8 @@ const DEFAULT_AGENT: AgentRecord = {
     "You can schedule your own future wakes with schedule (a one-shot like 'check " +
     "back tomorrow at 9am' or a recurring routine), review them with list_schedules, " +
     "and drop one with cancel_schedule. " +
+    "You can inspect your own operational state with list_runs, list_sessions, and " +
+    "list_triggers. " +
     "Use the available tools when they help accomplish the task.",
   model: "claude-opus-4-8",
   toolAllowlist: [
@@ -47,6 +49,9 @@ const DEFAULT_AGENT: AgentRecord = {
     "schedule",
     "list_schedules",
     "cancel_schedule",
+    "list_runs",
+    "list_sessions",
+    "list_triggers",
   ],
 };
 

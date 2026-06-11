@@ -114,6 +114,25 @@ CREATE TABLE IF NOT EXISTS triggers (
 );
 CREATE INDEX IF NOT EXISTS idx_triggers_due ON triggers(enabled, next_fire_at);
 
+-- The action audit log (recorded-authority substrate). One row per tool-execution
+-- attempt: the policy decision that governed it and how it resolved. Makes "what
+-- did this agent do, what was allowed, and why" a query. The broker's fs leases
+-- and richer tracing extend this same log later.
+CREATE TABLE IF NOT EXISTS actions (
+  id          TEXT PRIMARY KEY,
+  run_id      TEXT NOT NULL,
+  session_key TEXT NOT NULL,
+  agent_id    TEXT NOT NULL,
+  tool_name   TEXT NOT NULL,
+  input       TEXT NOT NULL,      -- JSON
+  decision    TEXT NOT NULL,      -- allow | gate | deny
+  reason      TEXT,
+  outcome     TEXT NOT NULL,      -- ok | error | denied
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_actions_run ON actions(run_id);
+CREATE INDEX IF NOT EXISTS idx_actions_agent ON actions(agent_id, created_at);
+
 -- The native protocol event log (reef-docs/04 per-run event log; shape left open
 -- in reef-docs/10). Persisted so a consumer can fetch history and reconnect
 -- without replay gaps (conch's reconnect pattern). Emitter lands in Phase 2.

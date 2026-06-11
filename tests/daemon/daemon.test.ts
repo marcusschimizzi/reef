@@ -72,6 +72,8 @@ describe("Daemon", () => {
     ]);
     expect(events.some((e) => e.type === "tool.completed")).toBe(true);
     expect(events.at(-1)?.type).toBe("run.completed");
+    // the ungated tool call was audited as allowed/ok
+    expect(daemon.listActions().some((a) => a.toolName === "echo" && a.decision === "allow" && a.outcome === "ok")).toBe(true);
     // events were persisted with monotonic per-session seq
     expect(events.map((e) => e.seq)).toEqual(
       [...events].map((_, i) => i + 1),
