@@ -1,5 +1,5 @@
 {
-  "$comment": "Reef config. Copy to .reef/config.json (or point REEF_CONFIG_FILE at it). All keys optional; a missing/invalid file falls back to defaults. Secrets are NEVER stored here — a provider names the env var its key comes from (apiKeyEnv). Env vars override any single key (REEF_MODEL, REEF_POLICY_FILE).",
+  "$comment": "Reef config. Copy to .reef/config.json (or point REEF_CONFIG_FILE at it). All keys optional; a missing/invalid file falls back to defaults. Secrets are NEVER stored here — a provider names the env var its key comes from (apiKeyEnv). Env vars override any single key (REEF_MODEL, REEF_POLICY_FILE). Use a provider via its `provider/model` id, e.g. defaultModel: zai-coding/glm-4.6.",
 
   "defaultModel": "claude-opus-4-8",
 
@@ -7,17 +7,31 @@
 
   "providers": [
     {
-      "$comment": "Z.ai coding plan (GLM models) via its OpenAI-compatible endpoint. Replace baseURL with the one from Z.ai's docs; set ZAI_API_KEY in the environment. Use e.g. defaultModel: zai/glm-4.6",
+      "$comment": "Z.ai general API (OpenAI-compatible). Models: glm-4.6, glm-4.7, glm-5.1. Set ZAI_API_KEY. e.g. zai/glm-4.6",
       "id": "zai",
       "kind": "openai-compatible",
       "baseURL": "https://api.z.ai/api/paas/v4",
       "apiKeyEnv": "ZAI_API_KEY"
     },
     {
-      "$comment": "OpenCode Go subscription gateway (open-source models). Fill in the baseURL from opencode.ai/docs; set OPENCODE_API_KEY. Then e.g. defaultModel: opencode/glm-5.1",
+      "$comment": "Z.ai GLM Coding Plan — a SEPARATE, coding-only endpoint (OpenAI-compatible). Set ZAI_API_KEY. e.g. zai-coding/glm-4.6",
+      "id": "zai-coding",
+      "kind": "openai-compatible",
+      "baseURL": "https://api.z.ai/api/coding/paas/v4",
+      "apiKeyEnv": "ZAI_API_KEY"
+    },
+    {
+      "$comment": "OpenCode Go (subscription gateway), OpenAI-compatible models. Models: glm-5.1, glm-5, kimi-k2.5, kimi-k2.6, deepseek-v4-pro, deepseek-v4-flash, mimo-v2.5, mimo-v2.5-pro. Key from opencode.ai/auth via OPENCODE_API_KEY. e.g. opencode/glm-5.1",
       "id": "opencode",
       "kind": "openai-compatible",
-      "baseURL": "https://opencode.ai/zen/v1",
+      "baseURL": "https://opencode.ai/zen/go/v1",
+      "apiKeyEnv": "OPENCODE_API_KEY"
+    },
+    {
+      "$comment": "OpenCode Go — same gateway, its Anthropic-compatible models. Models: minimax-m3, minimax-m2.7, minimax-m2.5, qwen3.7-max, qwen3.7-plus, qwen3.6-plus. Same OPENCODE_API_KEY. e.g. opencode-anthropic/minimax-m3",
+      "id": "opencode-anthropic",
+      "kind": "anthropic",
+      "baseURL": "https://opencode.ai/zen/go/v1",
       "apiKeyEnv": "OPENCODE_API_KEY"
     }
   ]
