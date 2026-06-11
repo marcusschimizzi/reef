@@ -20,6 +20,18 @@ describe("nextFireTime", () => {
     const next = nextFireTime({ kind: "cron", expr: "0 9 * * *", tz: "UTC" }, after);
     expect(next?.toISOString()).toBe("2026-06-10T09:00:00.000Z");
   });
+
+  it("returns a one-shot's instant while it is still in the future", () => {
+    const after = new Date("2026-06-10T12:00:00.000Z");
+    const next = nextFireTime({ kind: "once", at: "2026-06-11T09:00:00.000Z" }, after);
+    expect(next?.toISOString()).toBe("2026-06-11T09:00:00.000Z");
+  });
+
+  it("exhausts a one-shot once its instant has passed (goes dormant, never re-fires)", () => {
+    const at = "2026-06-10T09:00:00.000Z";
+    expect(nextFireTime({ kind: "once", at }, new Date("2026-06-10T09:00:00.000Z"))).toBeUndefined();
+    expect(nextFireTime({ kind: "once", at }, new Date("2026-06-10T10:00:00.000Z"))).toBeUndefined();
+  });
 });
 
 describe("assertValidSpec", () => {
@@ -34,5 +46,10 @@ describe("assertValidSpec", () => {
 
   it("rejects an unparseable cron expression", () => {
     expect(() => assertValidSpec({ kind: "cron", expr: "not a cron" })).toThrow();
+  });
+
+  it("accepts a valid one-shot instant and rejects garbage", () => {
+    expect(() => assertValidSpec({ kind: "once", at: "2026-06-11T09:00:00Z" })).not.toThrow();
+    expect(() => assertValidSpec({ kind: "once", at: "whenever" })).toThrow(/valid ISO-8601/);
   });
 });

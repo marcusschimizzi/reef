@@ -9,6 +9,7 @@ import type {
   Run,
   RunSource,
   Trigger,
+  TriggerOrigin,
   TriggerSpec,
   TriggerType,
 } from "../core/types.js";
@@ -16,6 +17,7 @@ import { Spine } from "../db/spine.js";
 import { BoundFs } from "../fs/capability.js";
 import { runAgentLoop, type LoopOptions } from "../loop/AgentLoop.js";
 import { assertValidSpec, nextFireTime } from "../triggers/schedule.js";
+import { DaemonScheduler, triggerSessionKey } from "../triggers/capability.js";
 import { DefaultGate, type ProactiveGate } from "../triggers/gate.js";
 import { Scheduler, DEFAULT_TICK_MS } from "./Scheduler.js";
 import { VercelRouter, type ModelRouter } from "../model/router.js";
@@ -25,6 +27,7 @@ import { builtinTools } from "../tools/builtins.js";
 import { fileTools } from "../tools/files.js";
 import { shellTools } from "../tools/shell.js";
 import { memoryTools } from "../tools/memory.js";
+import { scheduleTools } from "../tools/schedule.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { EventSink } from "./sink.js";
 import { Inbox } from "./inbox.js";
@@ -109,7 +112,13 @@ export class Daemon {
     this.memoryFactory =
       opts.memory ?? ((agentId) => new SqliteMemory(this.spine.connection, agentId));
     this.tools = new ToolRegistry();
-    for (const tool of [...builtinTools, ...fileTools, ...shellTools, ...memoryTools]) {
+    for (const tool of [
+      ...builtinTools,
+      ...fileTools,
+      ...shellTools,
+      ...memoryTools,
+      ...scheduleTools,
+    ]) {
       this.tools.register(tool);
     }
     this.inbox = new Inbox<Job>((job) => this.processJob(job));
@@ -200,6 +209,9 @@ export class Daemon {
     input: string;
     catchUpPolicy?: CatchUpPolicy;
     enabled?: boolean;
+    /** Provenance (Phase 4c). Operator-created by default; the self-scheduling
+     *  capability is the only path that writes "agent". */
+    createdBy?: TriggerOrigin;
   }): Trigger {
     assertValidSpec(input.spec);
     const id = newTriggerId();
@@ -211,7 +223,8 @@ export class Daemon {
       spec: input.spec,
       input: input.input,
       // Stable per-trigger session: a recurring routine is one ongoing thread.
-      sessionKey: `reef:${input.agentId}:trigger-${id}`,
+      sessionKey: triggerSessionKey(input.agentId, id),
+      createdBy: input.createdBy ?? "operator",
       enabled,
       catchUpPolicy: input.catchUpPolicy ?? "fire_once",
       nextFireAt: enabled ? nextFireTime(input.spec, new Date())?.toISOString() : undefined,
@@ -366,6 +379,7 @@ export class Daemon {
             fs: new BoundFs(root),
             workspaceRoot: root,
             memory: this.memoryFor(agent.id),
+            scheduler: new DaemonScheduler(this.spine, agent.id),
             signal: aborter.signal,
           },
           emit: this.sink.emit,

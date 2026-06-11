@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import type { FsCapability } from "../fs/capability.js";
 import type { MemoryStore } from "../memory/seam.js";
+import type { SchedulerCapability } from "../triggers/capability.js";
 
 // What a tool receives at execution time. The fs capability is injected here —
 // a tool reaches the filesystem only through `ctx.fs`, never via ambient paths
@@ -13,6 +14,10 @@ export interface ToolContext {
    *  optional so lightweight/no-memory execution contexts (and tool tests that
    *  don't touch memory) need not supply one. Memory tools assert it. */
   memory?: MemoryStore;
+  /** The agent's self-scheduling capability (Phase 4c). Present whenever the
+   *  daemon runs a tool; optional so no-scheduler contexts (and tool tests that
+   *  don't schedule) need not supply one. The schedule tools assert it. */
+  scheduler?: SchedulerCapability;
   signal?: AbortSignal;
 }
 

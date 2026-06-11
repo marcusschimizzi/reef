@@ -182,6 +182,28 @@ describe("scheduled triggers", () => {
     daemon.close();
   });
 
+  it("a one-shot (self-scheduled) trigger fires exactly once, then goes dormant", async () => {
+    const { daemon, router } = makeDaemon(tempDir());
+    const at = new Date(Date.now() + 1000).toISOString();
+    const trigger = daemon.createTrigger({
+      agentId: "reef",
+      spec: { kind: "once", at },
+      input: "check back on the build",
+      createdBy: "agent",
+    });
+    expect(daemon.spine.getTrigger(trigger.id)?.createdBy).toBe("agent");
+
+    await daemon.tickTriggers(soon());
+    expect(router.calls).toBe(1);
+    // exhausted: no next fire, so a later tick does nothing more
+    const after = daemon.spine.getTrigger(trigger.id)!;
+    expect(after.nextFireAt).toBeUndefined();
+    expect(after.lastFiredAt).toBeDefined();
+    await daemon.tickTriggers(wayLater());
+    expect(router.calls).toBe(1);
+    daemon.close();
+  });
+
   it("survives a restart — a persisted trigger fires from a fresh daemon", async () => {
     const dir = tempDir();
     const first = makeDaemon(dir);

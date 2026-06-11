@@ -145,10 +145,23 @@ export type RunSource =
  */
 export type TriggerType = "schedule" | "heartbeat";
 
-/** When a trigger fires (Phase 4a). v1 ships cron and fixed interval. */
+/**
+ * Who authored a trigger (Phase 4c). `operator` = created out-of-band by a human
+ * or the daemon itself (heartbeat, HTTP API); `agent` = self-scheduled by reef
+ * via the `schedule` tool. The safety bounds on agent-authored future work apply
+ * only to `agent` triggers, and the agent can list/cancel only its own.
+ */
+export type TriggerOrigin = "operator" | "agent";
+
+/**
+ * When a trigger fires (Phase 4a/4c). `cron` and `interval` recur; `once` fires
+ * a single time at `at` then goes dormant (its `nextFireAt` clears) — the shape
+ * self-scheduling needs for "check back tomorrow at 9am".
+ */
 export type TriggerSpec =
   | { kind: "cron"; expr: string; tz?: string }
-  | { kind: "interval"; seconds: number };
+  | { kind: "interval"; seconds: number }
+  | { kind: "once"; at: string };
 
 /**
  * What to do with fires that were due while the daemon was down. `fire_once`
@@ -172,6 +185,8 @@ export interface Trigger {
   input: string;
   /** Stable session for this trigger's runs (continuity across firings). */
   sessionKey: string;
+  /** Who created it (Phase 4c) — gates the self-scheduling safety bounds. */
+  createdBy: TriggerOrigin;
   enabled: boolean;
   catchUpPolicy: CatchUpPolicy;
   /** ISO-8601 of the next due fire; absent once the schedule is exhausted. */

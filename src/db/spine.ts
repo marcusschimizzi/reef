@@ -16,6 +16,7 @@ import type {
   StepState,
   StopReason,
   Trigger,
+  TriggerOrigin,
   TriggerSpec,
   TriggerType,
   Usage,
@@ -60,6 +61,7 @@ interface TriggerRow {
   spec: string;
   input: string;
   session_key: string;
+  created_by: string;
   enabled: number;
   catch_up_policy: string;
   next_fire_at: string | null;
@@ -461,9 +463,9 @@ export class Spine {
     this.db
       .prepare(
         `INSERT INTO triggers
-           (id, agent_id, type, spec, input, session_key, enabled,
+           (id, agent_id, type, spec, input, session_key, created_by, enabled,
             catch_up_policy, next_fire_at, last_fired_at, created_at)
-         VALUES (@id, @agent_id, @type, @spec, @input, @session_key, @enabled,
+         VALUES (@id, @agent_id, @type, @spec, @input, @session_key, @created_by, @enabled,
             @catch_up_policy, @next_fire_at, @last_fired_at, @created_at)`,
       )
       .run({
@@ -473,6 +475,7 @@ export class Spine {
         spec: json(t.spec),
         input: t.input,
         session_key: t.sessionKey,
+        created_by: t.createdBy,
         enabled: t.enabled ? 1 : 0,
         catch_up_policy: t.catchUpPolicy,
         next_fire_at: t.nextFireAt ?? null,
@@ -521,6 +524,27 @@ export class Spine {
 
   setTriggerEnabled(id: string, enabled: boolean): void {
     this.db.prepare(`UPDATE triggers SET enabled = ? WHERE id = ?`).run(enabled ? 1 : 0, id);
+  }
+
+  /** Remove a trigger entirely (the agent cancelling one of its own — Phase 4c). */
+  deleteTrigger(id: string): void {
+    this.db.prepare(`DELETE FROM triggers WHERE id = ?`).run(id);
+  }
+
+  /**
+   * Pending agent-authored triggers for one agent — enabled and still having a
+   * future fire. The count the self-scheduling cap is enforced against (a spent
+   * one-shot has a null next_fire_at, so it stops counting once it has fired).
+   */
+  countPendingAgentTriggers(agentId: string): number {
+    const { c } = this.db
+      .prepare(
+        `SELECT COUNT(*) AS c FROM triggers
+         WHERE agent_id = ? AND created_by = 'agent'
+           AND enabled = 1 AND next_fire_at IS NOT NULL`,
+      )
+      .get(agentId) as { c: number };
+    return c;
   }
 
   // ── events (native protocol log; consumer reconnect — Phase 2) ──────────────
@@ -593,6 +617,7 @@ function rowToTrigger(row: TriggerRow): Trigger {
     spec: JSON.parse(row.spec) as TriggerSpec,
     input: row.input,
     sessionKey: row.session_key,
+    createdBy: row.created_by as TriggerOrigin,
     enabled: row.enabled === 1,
     catchUpPolicy: row.catch_up_policy as CatchUpPolicy,
     nextFireAt: row.next_fire_at ?? undefined,

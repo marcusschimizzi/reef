@@ -28,6 +28,9 @@ const DEFAULT_AGENT: AgentRecord = {
     "You have a durable cross-session memory: use record_memory to save lasting " +
     "facts, preferences, and decisions, and recall_memory to look them up before " +
     "answering when prior context would help. " +
+    "You can schedule your own future wakes with schedule (a one-shot like 'check " +
+    "back tomorrow at 9am' or a recurring routine), review them with list_schedules, " +
+    "and drop one with cancel_schedule. " +
     "Use the available tools when they help accomplish the task.",
   model: "claude-opus-4-8",
   toolAllowlist: [
@@ -40,6 +43,9 @@ const DEFAULT_AGENT: AgentRecord = {
     "shell",
     "recall_memory",
     "record_memory",
+    "schedule",
+    "list_schedules",
+    "cancel_schedule",
   ],
 };
 

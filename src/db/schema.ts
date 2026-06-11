@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS triggers (
   spec            TEXT NOT NULL,    -- JSON TriggerSpec (cron | interval)
   input           TEXT NOT NULL,    -- instruction rendered into the wake message
   session_key     TEXT NOT NULL,    -- stable session for this trigger's runs
+  created_by      TEXT NOT NULL DEFAULT 'operator', -- operator | agent (Phase 4c)
   enabled         INTEGER NOT NULL, -- 0 | 1
   catch_up_policy TEXT NOT NULL,    -- fire_once | skip
   next_fire_at    TEXT,             -- ISO-8601; null once exhausted
@@ -132,4 +133,27 @@ export function applySchema(db: Database): void {
   db.pragma("synchronous = NORMAL");
   db.pragma("foreign_keys = ON");
   db.exec(DDL);
+  migrate(db);
+}
+
+/**
+ * Additive migrations for databases created by an older schema. `CREATE TABLE IF
+ * NOT EXISTS` never alters an existing table, so a column added to the DDL above
+ * is invisible to a pre-existing db without an explicit ALTER. Each step is
+ * guarded by a column-presence check, so applying the schema is idempotent.
+ */
+function migrate(db: Database): void {
+  addColumnIfMissing(db, "triggers", "created_by", "TEXT NOT NULL DEFAULT 'operator'");
+}
+
+function addColumnIfMissing(
+  db: Database,
+  table: string,
+  column: string,
+  decl: string,
+): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+  }
 }

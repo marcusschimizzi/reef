@@ -23,6 +23,13 @@ export function nextFireTime(spec: TriggerSpec, after: Date): Date | undefined {
       const cron = new Cron(spec.expr, spec.tz ? { timezone: spec.tz } : {});
       return cron.nextRun(after) ?? undefined;
     }
+    case "once": {
+      // Fires exactly once. Still in the future → that instant; already past
+      // (it has fired, or the moment elapsed) → exhausted, so the trigger goes
+      // dormant rather than re-firing.
+      const at = new Date(spec.at);
+      return at.getTime() > after.getTime() ? at : undefined;
+    }
   }
 }
 
@@ -30,6 +37,12 @@ export function nextFireTime(spec: TriggerSpec, after: Date): Date | undefined {
 export function assertValidSpec(spec: TriggerSpec): void {
   if (spec.kind === "interval") {
     if (!(spec.seconds > 0)) throw new Error("interval trigger needs seconds > 0");
+    return;
+  }
+  if (spec.kind === "once") {
+    if (Number.isNaN(Date.parse(spec.at))) {
+      throw new Error(`once trigger needs a valid ISO-8601 instant: ${spec.at}`);
+    }
     return;
   }
   // Constructing a Cron throws on an unparseable expression.
