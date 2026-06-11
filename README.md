@@ -11,11 +11,16 @@ project from.
 
 ```
 npm install
+npm run setup    # guided: pick a provider, enter your API key (stored in your OS keychain)
 npm run daemon   # start the agent daemon (unix socket + HTTP/SSE on :9876)
 npm run tui      # the Ink terminal UI, in a second shell
 ```
 
-Set `ANTHROPIC_API_KEY` in `.env` (see `.env.example`). State lives in `~/.reef`
+`npm run setup` is the easy path — choose a provider from the catalog (Anthropic,
+OpenAI, Ollama, OpenRouter, Z.ai, OpenCode Go, …), confirm a model, and enter the
+key with hidden input. The key is stored in the **OS keyring** (a 0600
+`~/.reef/secrets.json` when no keyring is available) — never in a config file or
+a manual env var. State lives in `~/.reef`
 (SQLite db, workspaces, control socket, config, policy) — cwd-independent, since
 the daemon is a persistent personal service. Set `REEF_HOME` to relocate it (e.g.
 `REEF_HOME=$PWD/.reef` to keep state repo-local while hacking on reef).

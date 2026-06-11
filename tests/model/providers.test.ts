@@ -70,10 +70,23 @@ describe("missingProviderKeys", () => {
       { id: "literal", kind: "openai", apiKey: "sk-..." }, // literal key → fine
       { id: "ollama", kind: "openai-compatible", baseURL: "https://x" }, // no key needed
     ]);
-    expect(missing).toEqual(["needy (set SOME_KEY)"]);
+    expect(missing).toEqual(["needy (no key — run `npm run setup`, or set SOME_KEY)"]);
 
     process.env.SOME_KEY = "set-now";
     expect(missingProviderKeys([{ id: "needy", kind: "openai-compatible", apiKeyEnv: "SOME_KEY" }])).toEqual([]);
+  });
+
+  it("treats a key present in the secret store as not-missing", () => {
+    delete process.env.SOME_KEY;
+    const store = {
+      backend: "test",
+      get: (id: string) => (id === "zai" ? "stored-key" : undefined),
+      set: () => {},
+      delete: () => {},
+    };
+    const providers = [{ id: "zai", kind: "openai-compatible" as const, baseURL: "https://x", apiKeyEnv: "SOME_KEY" }];
+    expect(missingProviderKeys(providers)).toEqual(["zai (no key — run `npm run setup`, or set SOME_KEY)"]);
+    expect(missingProviderKeys(providers, store)).toEqual([]); // key is in the store
   });
 
   it("never echoes a value-like apiKeyEnv (no secret in logs)", () => {

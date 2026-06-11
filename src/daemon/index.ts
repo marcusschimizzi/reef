@@ -12,6 +12,7 @@ import { DefaultPolicy } from "../policy/policy.js";
 import { buildSurfaces } from "../surfaces/index.js";
 import { VercelRouter } from "../model/router.js";
 import { missingProviderKeys } from "../model/providers.js";
+import { openSecretStore } from "../secrets/store.js";
 import { startSocketServer } from "./socket.js";
 
 loadEnv();
@@ -76,16 +77,17 @@ const DEFAULT_AGENT: AgentRecord = {
 // policy's proactive-gated action follows that, and surfaces are the channels.
 const routeApprovals = config.proactiveApproval === "route";
 const surfaces = buildSurfaces(config.surfaces, log);
-// Warn loudly if a configured provider's API key env var is unset/empty — the
-// usual cause of a mid-run 401.
-const missingKeys = missingProviderKeys(config.providers);
-if (missingKeys.length) log(`WARN providers with no API key in env: ${missingKeys.join(", ")}`);
+const secrets = openSecretStore(STATE_DIR, log); // keyring, or 0600 file fallback
+// Warn loudly if a configured provider has no resolvable API key (store/env) —
+// the usual cause of a mid-run 401.
+const missingKeys = missingProviderKeys(config.providers, secrets);
+if (missingKeys.length) log(`WARN providers with no API key: ${missingKeys.join(", ")}`);
 const fallbackPolicy = new DefaultPolicy({ proactiveGatedAction: routeApprovals ? "gate" : "deny" });
 
 const daemon = new Daemon({
   dbPath: join(STATE_DIR, "reef.db"),
   workspaceDir: join(STATE_DIR, "workspaces"),
-  router: new VercelRouter(config.providers), // built-ins + any custom config providers
+  router: new VercelRouter(config.providers, secrets), // built-ins + custom + secret-store keys
   policy: loadPolicy(POLICY_FILE, log, fallbackPolicy),
   surfaces,
   proactiveApprovalTimeoutSeconds: config.proactiveApprovalTimeoutSeconds,

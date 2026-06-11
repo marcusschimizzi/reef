@@ -16,6 +16,7 @@ import {
 import type { z } from "zod";
 import type { ContentBlock, Message, Usage } from "../core/types.js";
 import { ProviderRegistry, type ProviderConfig } from "./providers.js";
+import type { SecretStore } from "../secrets/store.js";
 
 /** A tool as the *model* needs to see it — name, description, input schema.
  *  (Execution is the loop's job, via the full Tool + its context.) */
@@ -54,9 +55,10 @@ export interface ModelRouter {
 export class VercelRouter implements ModelRouter {
   private readonly registry: ProviderRegistry;
 
-  /** Pass user-configured providers (custom endpoints) to extend the built-ins. */
-  constructor(providers: ProviderConfig[] = []) {
-    this.registry = new ProviderRegistry(providers);
+  /** Pass user-configured providers (custom endpoints) and the secret store
+   *  (the primary source for API keys) to extend the built-ins. */
+  constructor(providers: ProviderConfig[] = [], secrets?: SecretStore) {
+    this.registry = new ProviderRegistry(providers, secrets);
   }
 
   async generateTurn(input: ModelTurnInput): Promise<ModelTurn> {

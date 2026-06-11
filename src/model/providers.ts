@@ -2,6 +2,7 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import type { LanguageModel } from "ai";
+import type { SecretStore } from "../secrets/store.js";
 
 // The provider registry — reef's map from a `provider/model` id to a vendored
 // (AI SDK) language model. Providers are described by *kind*: `anthropic`,
@@ -61,10 +62,13 @@ export function parseModelId(id: string): ParsedModelId {
 export class ProviderRegistry {
   private readonly configs = new Map<string, ProviderConfig>();
   private readonly factories = new Map<string, (model: string) => LanguageModel>();
+  private readonly secrets?: SecretStore;
 
-  /** Built-ins first, then user providers (so config can override a built-in). */
-  constructor(providers: ProviderConfig[] = []) {
+  /** Built-ins first, then user providers (so config can override a built-in).
+   *  A SecretStore, if given, is the primary source for API keys. */
+  constructor(providers: ProviderConfig[] = [], secrets?: SecretStore) {
     for (const p of [...BUILTINS, ...providers]) this.configs.set(p.id, p);
+    this.secrets = secrets;
   }
 
   /** The provider ids this registry knows. */
@@ -84,14 +88,16 @@ export class ProviderRegistry {
     if (!config) {
       throw new Error(`unknown model provider "${providerId}" — configure it in .reef/config.json`);
     }
-    const factory = build(config);
+    const factory = build(config, this.secrets);
     this.factories.set(providerId, factory);
     return factory;
   }
 }
 
-function apiKeyOf(c: ProviderConfig): string | undefined {
-  const key = c.apiKey ?? (c.apiKeyEnv ? process.env[c.apiKeyEnv] : undefined);
+function apiKeyOf(c: ProviderConfig, secrets?: SecretStore): string | undefined {
+  // literal (rare) → secret store (setup-entered) → env var (CI/override).
+  const fromEnv = c.apiKeyEnv && ENV_NAME.test(c.apiKeyEnv) ? process.env[c.apiKeyEnv] : undefined;
+  const key = c.apiKey ?? secrets?.get(c.id) ?? fromEnv;
   return key?.trim() ? key : undefined; // empty/whitespace → treat as unset
 }
 
@@ -105,23 +111,24 @@ const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
  * placed there (a misconfigured key) is reported as an error, never printed —
  * otherwise the warning would leak the secret.
  */
-export function missingProviderKeys(providers: ProviderConfig[]): string[] {
+export function missingProviderKeys(providers: ProviderConfig[], secrets?: SecretStore): string[] {
   const out: string[] = [];
   for (const p of providers) {
     if (p.apiKey || !p.apiKeyEnv) continue; // literal key, or no key needed
+    if (secrets?.get(p.id)?.trim()) continue; // key is in the secret store
     if (!ENV_NAME.test(p.apiKeyEnv)) {
       out.push(`${p.id} (apiKeyEnv must be an env var NAME, not the key itself — fix the config)`);
     } else if (!process.env[p.apiKeyEnv]?.trim()) {
-      out.push(`${p.id} (set ${p.apiKeyEnv})`);
+      out.push(`${p.id} (no key — run \`npm run setup\`, or set ${p.apiKeyEnv})`);
     }
   }
   return out;
 }
 
-function build(c: ProviderConfig): (model: string) => LanguageModel {
+function build(c: ProviderConfig, secrets?: SecretStore): (model: string) => LanguageModel {
   switch (c.kind) {
     case "anthropic": {
-      const key = apiKeyOf(c);
+      const key = apiKeyOf(c, secrets);
       // Bearer (authToken) for gateways; x-api-key (apiKey) for real Anthropic.
       const provider = createAnthropic(
         c.auth === "bearer"
@@ -131,14 +138,14 @@ function build(c: ProviderConfig): (model: string) => LanguageModel {
       return (model) => provider(model);
     }
     case "openai": {
-      const provider = createOpenAI({ apiKey: apiKeyOf(c), baseURL: c.baseURL });
+      const provider = createOpenAI({ apiKey: apiKeyOf(c, secrets), baseURL: c.baseURL });
       return (model) => provider(model);
     }
     case "openai-compatible": {
       if (!c.baseURL) {
         throw new Error(`provider "${c.id}" (openai-compatible) needs a baseURL`);
       }
-      const provider = createOpenAICompatible({ name: c.id, baseURL: c.baseURL, apiKey: apiKeyOf(c) });
+      const provider = createOpenAICompatible({ name: c.id, baseURL: c.baseURL, apiKey: apiKeyOf(c, secrets) });
       return (model) => provider(model);
     }
   }
