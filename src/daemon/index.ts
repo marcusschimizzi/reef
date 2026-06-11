@@ -5,6 +5,7 @@ import type { AgentRecord } from "../core/types.js";
 import { startHttpInterface } from "../interface/http.js";
 import { Daemon } from "./Daemon.js";
 import { attachRunLogger } from "./log.js";
+import { loadPolicy } from "../policy/config.js";
 import { startSocketServer } from "./socket.js";
 
 loadEnv();
@@ -15,6 +16,8 @@ const HTTP_PORT = Number(process.env.REEF_HTTP_PORT ?? 9876);
 const HTTP_API_KEY = process.env.REEF_API_KEY || undefined;
 // Self-maintenance heartbeat cadence; 0 / unset = no heartbeat (opt-in).
 const HEARTBEAT_MINUTES = Number(process.env.REEF_HEARTBEAT_MINUTES ?? 0);
+// Approval-policy config; default location is .reef/policy.json (absent = DefaultPolicy).
+const POLICY_FILE = process.env.REEF_POLICY_FILE || join(STATE_DIR, "policy.json");
 mkdirSync(STATE_DIR, { recursive: true });
 
 // The one v1 agent. "Add an agent" later is another record, not new code.
@@ -58,6 +61,7 @@ const DEFAULT_AGENT: AgentRecord = {
 const daemon = new Daemon({
   dbPath: join(STATE_DIR, "reef.db"),
   workspaceDir: join(STATE_DIR, "workspaces"),
+  policy: loadPolicy(POLICY_FILE, (m) => process.stderr.write(`${m}\n`)),
 });
 daemon.registerAgent(DEFAULT_AGENT);
 

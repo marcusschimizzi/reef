@@ -1,0 +1,24 @@
+{
+  "$comment": "Reef approval policy. Copy to .reef/policy.json (or point REEF_POLICY_FILE at it). Rules are evaluated in order, first match wins; anything unmatched falls through to the default (gated tools still ask for approval). This example auto-allows a conservative dev-loop shell safelist so edit -> typecheck -> test runs unattended-but-recorded; git push, rm, anything chained/redirected, and anything not listed still gate. Auto-allow only ever applies to plain commands (no ; && | > backtick $( quotes etc.); matching is on parsed argv prefixes, so [\"git\",\"diff\"] allows `git diff --stat` but not `git push`.",
+  "rules": [
+    {
+      "tool": "shell",
+      "command": {
+        "argvPrefixIn": [
+          ["git", "status"],
+          ["git", "diff"],
+          ["git", "log"],
+          ["git", "show"],
+          ["npm", "test"],
+          ["npm", "run", "typecheck"],
+          ["npm", "run", "build"],
+          ["npx", "tsc"],
+          ["npx", "vitest", "run"],
+          ["ls"],
+          ["cat"]
+        ]
+      },
+      "action": "allow"
+    }
+  ]
+}

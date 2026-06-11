@@ -25,6 +25,19 @@ Set `ANTHROPIC_API_KEY` in `.env` (see `.env.example`). State lives in `./.reef`
 - `REEF_LOG=off` — silence run-lifecycle logging.
 - `REEF_THEME`, `REEF_AVATAR` — TUI look (`teal` + `pixel` by default).
 
+## Approval policy
+
+Whether a tool call runs, asks for approval, or is refused is decided by an
+approval policy. By default, gated tools (`shell`) ask for human approval. You
+can configure this with a JSON file at `.reef/policy.json` (or `REEF_POLICY_FILE`)
+— an ordered list of rules, first match wins, anything unmatched falls through to
+the default. See `policy.example.json` for a conservative dev-loop shell safelist
+that auto-allows `tsc`/`vitest`/`git diff` and the like (every action is still
+recorded in the `actions` audit log; `GET /v1/actions`). Auto-allow only applies
+to plain commands and matches on parsed argv prefixes, so `git push`, `rm`, and
+anything chained/redirected still gate. A missing or invalid config falls back to
+the default — a broken config never grants authority.
+
 ## Develop
 
 ```
