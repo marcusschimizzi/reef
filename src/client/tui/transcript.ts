@@ -225,6 +225,17 @@ export function reduceEvent(state: TranscriptState, event: ReefEvent): Transcrip
     case "run.failed":
       return { ...push(state, { kind: "error", text: event.error }), status: "idle" };
 
+    case "coding.output":
+      return pushNotice(state, event.text);
+
+    case "coding.prompt.detected":
+      return pushNotice(
+        state,
+        `coding agent needs a decision:\n${event.promptText}\n${event.options
+          .map((o) => `  ${o.index}. ${o.label}`)
+          .join("\n")}`,
+      );
+
     default:
       return state;
   }
