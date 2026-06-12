@@ -29,6 +29,12 @@ export interface LoopDeps {
   compaction?: CompactionPolicy;
   /** Approval policy governing tool calls; omit for the behavior-preserving default. */
   policy?: ApprovalPolicy;
+  /** Start external subwork for a suspendsForSubwork tool; returns the coding
+   *  session id. Omit to disable subwork (the tool then runs normally). */
+  startSubwork?: (run: Run, call: ToolUse, source: RunSource) => Promise<string>;
+  /** Read a completed subwork's result for (runId, toolUseId); undefined until it
+   *  exists and has finished. */
+  collectSubwork?: (runId: string, toolUseId: string) => { result: string } | undefined;
 }
 
 export interface LoopOptions {

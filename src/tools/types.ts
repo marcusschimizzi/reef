@@ -39,5 +39,10 @@ export interface Tool<I = any> {
   /** If true, the run suspends for approval before this tool executes. v1: not
    *  yet enforced (the loop emits the request); the gate lands in Phase 2. */
   needsApproval?: boolean;
+  /** If true, running this tool starts external subwork (a coding session) and
+   *  suspends the run (`awaiting_subwork`) until it completes; the result becomes
+   *  the tool_result on resume. The loop's startSubwork/collectSubwork hooks do the
+   *  work — the tool's own run() is never executed for effect. */
+  suspendsForSubwork?: boolean;
   run(input: I, ctx: ToolContext): Promise<unknown>;
 }
