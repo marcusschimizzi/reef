@@ -64,6 +64,9 @@ interface Live {
   handedBack: boolean;
   /** Disposer for the Stop-hook sentinel-file watcher; cleared on teardown. */
   disposeWatch?: () => void;
+  /** Whether the session ever produced output — distinguishes a startup failure
+   *  (zero output) from a mid-task error when the PTY exits non-zero. */
+  sawOutput?: boolean;
 }
 
 export class CodingSessionManager {
@@ -214,11 +217,21 @@ export class CodingSessionManager {
       // not failed. `delete` both checks membership and consumes the flag.
       const cancelled = this.cancelling.delete(id);
       const status = cancelled ? "cancelled" : code === 0 || code === null ? "completed" : "failed";
-      const result = this.readResult(id);
-      this.deps.spine.setCodingSessionStatus(id, status, result);
       if (status === "failed") {
-        this.emitCoding(id, { type: "coding.session.failed", codingSessionId: id, error: `exited with code ${code}` });
+        // A failed session usually has no transcript to summarize — give the manager
+        // a diagnostic so it (and the user) can tell a startup failure (zero output)
+        // from a mid-task error, instead of an opaque "session failed".
+        const sawOutput = this.live.get(id)?.sawOutput ?? false;
+        const error =
+          this.readResult(id) ??
+          (sawOutput
+            ? `The coding agent exited with code ${code} mid-task (it produced output but no final result).`
+            : `The coding agent exited with code ${code} and produced no output — it likely failed to start (check the directory, the agent's authentication, or the plan/usage limit).`);
+        this.deps.spine.setCodingSessionStatus(id, "failed", error);
+        this.emitCoding(id, { type: "coding.session.failed", codingSessionId: id, error });
       } else {
+        const result = this.readResult(id);
+        this.deps.spine.setCodingSessionStatus(id, status, result);
         this.emitCoding(id, { type: "coding.session.completed", codingSessionId: id, result });
       }
       trace.close();
@@ -261,6 +274,7 @@ export class CodingSessionManager {
     const l = this.live.get(id);
     l?.trace.write({ type: "event", event: ev });
     if (ev.type === "output") {
+      if (l) l.sawOutput = true;
       this.emitCoding(id, { type: "coding.output", codingSessionId: id, text: ev.text });
       // Handback is detected by the Stop hook (post-turn-completion) + idle, both of
       // which fire AFTER Claude Code flushes the turn to its transcript. We do NOT
