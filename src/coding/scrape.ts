@@ -44,10 +44,20 @@ export function parseOptions(stripped: string): PromptOption[] {
   for (let i = start; i < lines.length; i++) {
     const m = lines[i]!.match(/^[\s❯>]*([1-9])\.\s*(\S.*?)\s*$/);
     if (!m || Number(m[1]) !== expected) break;
-    options.push({ index: expected, label: m[2]! });
+    options.push({ index: expected, label: normalizeLabel(m[2]!) });
     expected += 1;
   }
   return options.length >= 2 ? options : [];
+}
+
+/** A trailing selection marker (✔/✓) — Claude Code re-renders the chosen option
+ *  with one. Stripping it makes the confirmation render fingerprint-identical to
+ *  the live prompt, so the detector debounces it instead of re-firing (and sending
+ *  a rogue keystroke into the now-resolved dialog). */
+const SELECTION_MARK = /\s*[✔✓]\s*$/u;
+
+function normalizeLabel(label: string): string {
+  return label.replace(SELECTION_MARK, "").trim();
 }
 
 /** Crude "a prompt is waiting" check: a numbered option list with the cursor
