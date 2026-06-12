@@ -17,7 +17,12 @@ import type { ApprovalPolicy } from "../policy/policy.js";
 import { CodingStreamProcessor, type DriverEvent } from "./processor.js";
 import type { CodingAgentDriver, CodingDriverHandle } from "./driver.js";
 import { answerFor, classifyPrompt, promptAction, type Decision } from "./prompts.js";
-import { findClaudeTranscript, latestToolUse, parseClaudeTranscript } from "./transcript.js";
+import {
+  findClaudeTranscript,
+  latestToolUse,
+  parseClaudeTranscript,
+  renderTranscript,
+} from "./transcript.js";
 import { TraceWriter } from "./trace.js";
 
 export interface CodingSessionManagerDeps {
@@ -92,11 +97,12 @@ export class CodingSessionManager {
       // not failed. `delete` both checks membership and consumes the flag.
       const cancelled = this.cancelling.delete(id);
       const status = cancelled ? "cancelled" : code === 0 || code === null ? "completed" : "failed";
-      this.deps.spine.setCodingSessionStatus(id, status);
+      const result = this.readResult(id);
+      this.deps.spine.setCodingSessionStatus(id, status, result);
       if (status === "failed") {
         this.emitCoding(id, { type: "coding.session.failed", codingSessionId: id, error: `exited with code ${code}` });
       } else {
-        this.emitCoding(id, { type: "coding.session.completed", codingSessionId: id });
+        this.emitCoding(id, { type: "coding.session.completed", codingSessionId: id, result });
       }
       trace.close();
       this.live.delete(id);
@@ -270,6 +276,20 @@ export class CodingSessionManager {
       { toolName: appr.toolName, input: appr.input, sessionKey: `coding:${id}` },
       decision === "deny" ? "deny" : "allow",
     );
+  }
+
+  /** The session's final assistant message, from Claude Code's own transcript —
+   *  the reliable "result" summary. undefined when the transcript is absent. */
+  private readResult(id: string): string | undefined {
+    const cs = this.deps.spine.getCodingSession(id);
+    if (!cs) return undefined;
+    const path = findClaudeTranscript(cs.externalSessionId, { cwd: cs.directory });
+    if (!path) return undefined;
+    const entries = parseClaudeTranscript(path);
+    for (let i = entries.length - 1; i >= 0; i--) {
+      if (entries[i]!.text && entries[i]!.role === "assistant") return entries[i]!.text;
+    }
+    return renderTranscript(entries) || undefined;
   }
 
   private emitCoding(id: string, body: { type: string } & Record<string, unknown>): void {

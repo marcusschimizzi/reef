@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Spine } from "../../src/db/spine.js";
 import { CodingSessionManager } from "../../src/coding/manager.js";
+import { encodeProjectPath } from "../../src/coding/transcript.js";
 import type { CodingAgentDriver, CodingDriverHandle, StartOpts } from "../../src/coding/driver.js";
 import type { ReefEvent, ReefEventInit } from "../../src/protocol/events.js";
 import type { ApprovalPolicy, PolicyContext, PolicyDecision } from "../../src/policy/policy.js";
@@ -125,6 +126,26 @@ describe("CodingSessionManager", () => {
     expect(driver.handle.written).toContain("1\r");
     expect(spine.getCodingApproval(req.approvalId)!.status).toBe("allowed");
     expect(spine.getCodingSession(id)!.status).toBe("running");
+  });
+
+  it("on completion, stores the transcript's final assistant text as result", () => {
+    const { spine, driver, mgr, dir } = setup(new FakePolicy(() => ({ action: "allow" })));
+    const root = join(dir, "claude-projects");
+    const workdir = join(dir, "work");
+    mkdirSync(workdir, { recursive: true });
+    const id = mgr.start({ agentKind: "claude-code", directory: workdir, task: "t" });
+    const ext = spine.getCodingSession(id)!.externalSessionId;
+    const tdir = join(root, encodeProjectPath(workdir));
+    mkdirSync(tdir, { recursive: true });
+    writeFileSync(
+      join(tdir, `${ext}.jsonl`),
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "Done: created a.ts" }] } }) + "\n",
+    );
+    // Point the manager's transcript lookup at our temp root.
+    process.env.REEF_CLAUDE_PROJECTS = root;
+    driver.handle.die(0);
+    delete process.env.REEF_CLAUDE_PROJECTS;
+    expect(spine.getCodingSession(id)!.result).toBe("Done: created a.ts");
   });
 
   it("close() kills live sessions and marks them cancelled", () => {
