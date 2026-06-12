@@ -476,3 +476,60 @@ future `send_feedback(sessionId, text)` that spawns `claude --resume <uuid>` wit
 idle disarmed during `awaiting_decision`; `appendSystemPrompt` carries the handback instruction
 (via `driver.lastOpts`); daemon: `coding.session.paused` enqueues a resume + `collectSubwork`
 returns the result for `paused`. Smoke updated to report `paused` (should now end cleanly, no cap).
+
+**Step 3.1 STATUS: BUILT + LIVE-CONFIRMED (2026-06-12).** Strengthened the handback instruction;
+added the deterministic Stop-hook path (`--settings` Stop hook touches a reef-owned sentinel reef
+watches — onboarding-clean, no repo pollution). Live: the Stop hook FIRES in interactive/PTY mode
+(sentinel file created) and the strengthened prompt made haiku emit the marker; result-capture
+moved to `onExit` (after the transcript flush) + marker stripped. Plus **model selection**
+(`--model`/`REEF_CODING_MODEL`).
+
+---
+
+## Step 3.2 — `send_feedback(sessionId, text)`: revive a paused session (design 2026-06-12)
+
+The payoff of the resumable-`paused` lifecycle: a reef agent feeds a follow-up increment to a
+parked coding session, reviving it via `claude --resume <uuid>`. Reuses the **same subwork
+suspend/resume machinery** as `start_coding_session` — the manager run suspends `awaiting_subwork`,
+the revived session runs, hands back (`paused`) with a NEW result, the run resumes with it.
+
+### Decisions (user-confirmed 2026-06-12)
+- **Not gated** (`needsApproval: false`): continuing an already-approved session is lower-risk; the
+  per-edit approvals INSIDE the session still gate via `ApprovalPolicy`.
+- **Invalid/non-`paused` sessionId → graceful error tool_result** (not a run failure): the loop's
+  subwork-suspend wraps `startSubwork`; a thrown revive-failure becomes an `isError` tool_result so
+  the agent learns + retries, and the run continues.
+
+### Necessary contract change — subwork tool_result exposes the session id
+The agent only sees tool_results (not raw events), so to call `send_feedback` it needs the `cs_…`
+id. `collectSubwork` now returns `{ result, failed, sessionId, status }`; the loop builds the
+subwork tool_result `output = { codingSessionId, status, result }` (was a bare string). Applies to
+`start_coding_session` AND `send_feedback` — more useful, and the id is how the agent references
+the session.
+
+### Mechanics
+- **Driver revive mode:** `StartOpts.resume?: boolean` → `claudeArgs` emits `--resume <id>`
+  (instead of `--session-id <id>`) + model/settings/append-prompt + the feedback text.
+- **`coding_sessions.model`** column (nullable) so revive faithfully reuses the original model
+  (also observability). Set on `start`.
+- **`CodingSessionManager.resume(sessionId, text, { spawningRunId, spawningToolUseId })`:** validate
+  the row is `paused` (else throw → graceful loop error); **re-link** `spawning_run_id` +
+  `spawning_tool_use_id` to the current (run, toolUse) so `collectSubwork` routes the new result
+  back; reopen the trace (append — one continuous record); status → `running`; `driver.start` in
+  resume mode with the stored model + a fresh handback settings file + the handback instruction;
+  re-arm the handback detectors. New handback → `paused` with the new result → run resumes. Shared
+  "live setup" (trace/processor/watcher/onData/onExit wiring) is extracted from `start`.
+- **`send_feedback` tool** (`src/tools/coding.ts`): `{ sessionId, text }`, `suspendsForSubwork:
+  true`, `needsApproval: false`, `run()` throws (loop-handled).
+- **Daemon `startSubwork` dispatch on `call.name`:** `send_feedback` → `manager.resume(...)`;
+  else → `manager.start(...)` (existing). `collectSubwork` unchanged beyond the id/status fields.
+- **Loop graceful failure:** the main-loop subwork-suspend wraps `await startSubwork` in try/catch
+  → on throw, commit an `isError` tool_result and continue (don't suspend).
+
+### Testing (no Claude spend)
+`claudeArgs` resume mode (`--resume` vs `--session-id`); manager `resume` revives a `paused` row
+(status→running, re-linked, driver got `resume:true` + stored model), throws on a non-`paused`
+id; tool registered with the flags; daemon dispatch (`send_feedback`→resume); loop builds the
+structured `{codingSessionId,status,result}` tool_result + the graceful-failure error result; e2e:
+start→paused→send_feedback→paused-again with the new result. Live (after): revive a real paused
+haiku session with a follow-up.
