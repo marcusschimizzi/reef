@@ -95,10 +95,39 @@ export async function runAgentLoop(
   let stopReason: StopReason = "completed";
 
   try {
-    // Resume preamble: finish the suspended turn whose tools were just decided.
+    // Resume preamble: finish the suspended turn. A pending step holding a
+    // suspendsForSubwork tool is a subwork resume (start-then-resuspend if the
+    // session hasn't finished yet, else commit its result); otherwise it's the
+    // ordinary approval resume.
     if (options.resumeApproval) {
-      if (spine.pendingApprovalCount(run.id) > 0) return "awaiting_approval";
-      if (await finishSuspendedTurn(run, deps, emit, index, source, policy)) index++;
+      const pending = spine.getSteps(run.id).find((s) => s.state === "pending");
+      const subworkCall = pending?.response?.find(
+        (b): b is ToolUse => b.type === "tool_use" && (tools.get(b.name)?.suspendsForSubwork ?? false),
+      );
+      if (pending && subworkCall) {
+        const collected = deps.collectSubwork?.(run.id, subworkCall.id);
+        if (!collected) {
+          // Approval was just granted but the session isn't started: start + park.
+          if (deps.startSubwork) await deps.startSubwork(run, subworkCall, source);
+          spine.setRunStatus(run.id, "suspended", { stopReason: "awaiting_subwork" });
+          emit({ type: "run.suspended", stopReason: "awaiting_subwork" });
+          return "awaiting_subwork";
+        }
+        const toolResults: ContentBlock[] = [
+          { type: "tool_result", toolUseId: subworkCall.id, output: collected.result },
+        ];
+        spine.appendMessage(run.sessionKey, "tool", toolResults, run.id);
+        spine.commitStep(run.id, pending.index, {
+          response: pending.response!,
+          toolResults,
+          usage: pending.usage,
+        });
+        emit({ type: "step.committed", index: pending.index, usage: pending.usage });
+        index++;
+      } else {
+        if (spine.pendingApprovalCount(run.id) > 0) return "awaiting_approval";
+        if (await finishSuspendedTurn(run, deps, emit, index, source, policy)) index++;
+      }
     }
 
     while (true) {
