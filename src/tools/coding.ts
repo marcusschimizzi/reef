@@ -26,4 +26,27 @@ export const startCodingSession: Tool<z.infer<typeof inputSchema>> = {
   },
 };
 
-export const codingTools: Tool[] = [startCodingSession];
+// Feed a follow-up increment to a PAUSED coding session, reviving it via
+// `claude --resume <uuid>`. Like start_coding_session it suspends the run until the
+// session hands back again. NOT gated (the session was already approved at start;
+// per-edit approvals inside it still apply). The sessionId comes from a prior
+// subwork tool_result's `codingSessionId`. A non-resumable id → an error result.
+const feedbackSchema = z.object({
+  sessionId: z.string().describe("The coding session id (cs_…) from a prior tool_result."),
+  text: z.string().describe("The follow-up instruction/feedback for the session."),
+});
+
+export const sendFeedback: Tool<z.infer<typeof feedbackSchema>> = {
+  name: "send_feedback",
+  description:
+    "Send follow-up instructions to a paused coding session (revives it via --resume). " +
+    "The run suspends until the session finishes the new increment; its summary is returned.",
+  inputSchema: feedbackSchema,
+  needsApproval: false,
+  suspendsForSubwork: true,
+  run: async () => {
+    throw new Error("send_feedback is handled by the loop's subwork hooks, not run()");
+  },
+};
+
+export const codingTools: Tool[] = [startCodingSession, sendFeedback];

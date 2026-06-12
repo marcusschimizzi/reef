@@ -161,6 +161,7 @@ CREATE TABLE IF NOT EXISTS coding_sessions (
   status       TEXT NOT NULL,
   task         TEXT NOT NULL,
   result       TEXT,
+  model        TEXT,
   trace_path   TEXT NOT NULL,
   created_at   TEXT NOT NULL,
   ended_at     TEXT
@@ -206,6 +207,7 @@ function migrate(db: Database): void {
   addColumnIfMissing(db, "approvals", "expires_at", "TEXT");
   addColumnIfMissing(db, "sessions", "model", "TEXT");
   addColumnIfMissing(db, "coding_sessions", "spawning_tool_use_id", "TEXT");
+  addColumnIfMissing(db, "coding_sessions", "model", "TEXT");
 }
 
 function addColumnIfMissing(

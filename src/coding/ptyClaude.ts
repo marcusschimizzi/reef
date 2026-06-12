@@ -11,7 +11,7 @@ import type { CodingAgentDriver, CodingDriverHandle, StartOpts } from "./driver.
  *  spawning a real PTY. `--model` is omitted when unset (Claude Code's default). */
 export function claudeArgs(opts: StartOpts): string[] {
   return [
-    "--session-id", opts.sessionId,
+    ...(opts.resume ? ["--resume", opts.sessionId] : ["--session-id", opts.sessionId]),
     ...(opts.model ? ["--model", opts.model] : []),
     ...(opts.settingsPath ? ["--settings", opts.settingsPath] : []),
     ...(opts.appendSystemPrompt ? ["--append-system-prompt", opts.appendSystemPrompt] : []),

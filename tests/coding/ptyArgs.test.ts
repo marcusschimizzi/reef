@@ -22,4 +22,10 @@ describe("claudeArgs", () => {
     const args = claudeArgs({ directory: "/x", sessionId: "u", task: "t", settingsPath: "/tmp/s.json", appendSystemPrompt: "hint" });
     expect(args).toEqual(["--session-id", "u", "--settings", "/tmp/s.json", "--append-system-prompt", "hint", "t"]);
   });
+
+  it("uses --resume (not --session-id) in resume mode, with the text as the prompt", () => {
+    const args = claudeArgs({ directory: "/x", sessionId: "uuid-1", task: "now do step 2", resume: true, model: "haiku" });
+    expect(args).toEqual(["--resume", "uuid-1", "--model", "haiku", "now do step 2"]);
+    expect(args).not.toContain("--session-id");
+  });
 });

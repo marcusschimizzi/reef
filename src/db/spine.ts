@@ -43,6 +43,8 @@ export interface CodingSessionRecord {
   status: string;
   task: string;
   result?: string;
+  /** Model the session runs on (e.g. "haiku"); reused verbatim on --resume revive. */
+  model?: string;
   tracePath: string;
   createdAt: string;
   endedAt?: string;
@@ -779,10 +781,18 @@ export class Spine {
     this.db
       .prepare(
         `INSERT INTO coding_sessions
-           (id, spawning_run_id, spawning_tool_use_id, agent_kind, external_session_id, directory, status, task, trace_path, created_at)
-         VALUES (@id, @spawningRunId, @spawningToolUseId, @agentKind, @externalSessionId, @directory, @status, @task, @tracePath, @createdAt)`,
+           (id, spawning_run_id, spawning_tool_use_id, agent_kind, external_session_id, directory, status, task, model, trace_path, created_at)
+         VALUES (@id, @spawningRunId, @spawningToolUseId, @agentKind, @externalSessionId, @directory, @status, @task, @model, @tracePath, @createdAt)`,
       )
-      .run({ ...rec, createdAt: nowIso() });
+      .run({ ...rec, model: rec.model ?? null, createdAt: nowIso() });
+  }
+
+  /** Re-point a (paused) coding session at the run + tool_use that is reviving it,
+   *  so the subwork resume routes the new increment result back to that caller. */
+  relinkCodingSessionSubwork(id: string, spawningRunId: string | null, spawningToolUseId: string | null): void {
+    this.db
+      .prepare(`UPDATE coding_sessions SET spawning_run_id = ?, spawning_tool_use_id = ? WHERE id = ?`)
+      .run(spawningRunId, spawningToolUseId, id);
   }
 
   getCodingSession(id: string): CodingSessionRecord | undefined {
@@ -983,6 +993,7 @@ function rowToCodingSession(row: Record<string, unknown>): CodingSessionRecord {
     status: row.status as string,
     task: row.task as string,
     result: (row.result as string | null) ?? undefined,
+    model: (row.model as string | null) ?? undefined,
     tracePath: row.trace_path as string,
     createdAt: row.created_at as string,
     endedAt: (row.ended_at as string | null) ?? undefined,

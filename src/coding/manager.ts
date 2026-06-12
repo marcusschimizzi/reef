@@ -84,6 +84,7 @@ export class CodingSessionManager {
     const externalSessionId = randomUUID();
     const id = `cs_${externalSessionId}`;
     const tracePath = join(this.deps.traceDir, `${id}.jsonl`);
+    const model = opts.model ?? process.env.REEF_CODING_MODEL;
 
     this.deps.spine.createCodingSession({
       id,
@@ -94,6 +95,7 @@ export class CodingSessionManager {
       directory: opts.directory,
       status: "running",
       task: opts.task,
+      model,
       tracePath,
     });
 
@@ -114,7 +116,7 @@ export class CodingSessionManager {
       sessionId: externalSessionId,
       task: opts.task,
       appendSystemPrompt: [HANDBACK_INSTRUCTION, this.deps.appendSystemPrompt].filter(Boolean).join("\n\n"),
-      model: opts.model ?? process.env.REEF_CODING_MODEL,
+      model,
       settingsPath: settingsFile,
     });
     this.live.set(id, { handle, processor, trace, source: opts.source ?? { kind: "message" }, handedBack: false });

@@ -6,8 +6,11 @@
 
 export interface StartOpts {
   directory: string;
-  /** reef-minted UUID passed to the agent (e.g. claude --session-id). */
+  /** reef-minted UUID. New session → `--session-id`; revive (resume) → `--resume`. */
   sessionId: string;
+  /** Revive an existing session (`claude --resume <sessionId>`) instead of creating
+   *  a new one (`--session-id`). The `task` is the new prompt for the resumed turn. */
+  resume?: boolean;
   task: string;
   /** Off-transcript orchestration framing (e.g. claude --append-system-prompt). */
   appendSystemPrompt?: string;
