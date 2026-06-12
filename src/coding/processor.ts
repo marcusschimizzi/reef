@@ -6,6 +6,7 @@
 // captured trace deterministically reproduces what the live session detected.
 
 import { detectPrompt, fingerprint, stripAnsi, type PromptOption } from "./scrape.js";
+import { renderText } from "./render.js";
 
 export type DriverEvent =
   | { type: "output"; text: string }
@@ -35,13 +36,15 @@ export class CodingStreamProcessor {
     } else {
       this.raw = (this.raw + chunk).slice(-TAIL);
     }
-    const stripped = stripAnsi(this.raw);
-    const options = detectPrompt(stripped);
+    // Detect on the RENDERED screen (cursor-positioning escapes reconstructed to
+    // real spacing), not the fused stripAnsi text — so option labels are readable.
+    const screen = renderText(this.raw);
+    const options = detectPrompt(screen);
     if (options) {
-      const fp = fingerprint(stripped);
+      const fp = fingerprint(screen);
       if (fp !== this.lastFingerprint) {
         this.lastFingerprint = fp;
-        events.push({ type: "prompt-pending", promptText: promptTextOf(stripped), options });
+        events.push({ type: "prompt-pending", promptText: promptTextOf(screen), options });
       }
     } else {
       this.lastFingerprint = ""; // prompt cleared — allow the next one to fire

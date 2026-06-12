@@ -25,23 +25,26 @@ export function collapse(s: string): string {
   return s.replace(/\s+/g, "");
 }
 
-/** Read a sequential `N. label` block (>=2 options) anchored at the last `1.`. */
+/** Read the sequential `N. label` block (>=2 options) anchored at the LAST line
+ *  that starts option 1 — so a stale earlier prompt lingering in scrollback can't
+ *  shadow the live one (the prompt currently awaiting input is the last rendered). */
 export function parseOptions(stripped: string): PromptOption[] {
   const lines = stripped.split("\n");
+  let start = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/^[\s❯>]*1\.\s/.test(lines[i]!)) {
+      start = i;
+      break;
+    }
+  }
+  if (start === -1) return [];
+
   const options: PromptOption[] = [];
   let expected = 1;
-  for (const line of lines) {
-    const m = line.match(/^[\s❯>]*([1-9])\.\s*(\S.*?)\s*$/);
-    if (!m) {
-      if (options.length > 0) break; // the block ended
-      continue;
-    }
-    const index = Number(m[1]);
-    if (index !== expected) {
-      if (options.length > 0) break;
-      continue;
-    }
-    options.push({ index, label: m[2]! });
+  for (let i = start; i < lines.length; i++) {
+    const m = lines[i]!.match(/^[\s❯>]*([1-9])\.\s*(\S.*?)\s*$/);
+    if (!m || Number(m[1]) !== expected) break;
+    options.push({ index: expected, label: m[2]! });
     expected += 1;
   }
   return options.length >= 2 ? options : [];
