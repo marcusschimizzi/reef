@@ -43,7 +43,7 @@ import { shellTools } from "../tools/shell.js";
 import { memoryTools } from "../tools/memory.js";
 import { scheduleTools } from "../tools/schedule.js";
 import { introspectTools } from "../tools/introspect.js";
-import { codingTools, startCodingSession } from "../tools/coding.js";
+import { codingTools, startCodingSession, sendFeedback } from "../tools/coding.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { EventSink } from "./sink.js";
 import { Inbox } from "./inbox.js";
@@ -714,6 +714,13 @@ export class Daemon {
           emit: this.sink.emit,
           maxSteps: this.maxSteps,
           startSubwork: async (r, call, src) => {
+            if (call.name === "send_feedback") {
+              // A revive intentionally re-links the SAME session to this run+tool, so
+              // (unlike start) it must NOT short-circuit on a prior subwork link.
+              const input = sendFeedback.inputSchema.parse(call.input);
+              this.coding.resume(input.sessionId, input.text, { spawningRunId: r.id, spawningToolUseId: call.id });
+              return input.sessionId;
+            }
             // Idempotent: if this (run, toolUse) already spawned a session, reuse it
             // (defends against a duplicate resume re-starting an in-flight session).
             const existing = this.spine.findCodingSessionBySubwork(r.id, call.id);
@@ -734,7 +741,12 @@ export class Daemon {
             // `paused` = handed back (increment done, resumable); a completable
             // result for the manager run, like completed/failed.
             if (!cs || (cs.status !== "completed" && cs.status !== "failed" && cs.status !== "paused")) return undefined;
-            return { result: cs.result ?? `coding session ${cs.id} ${cs.status}`, failed: cs.status === "failed" };
+            return {
+              result: cs.result ?? `coding session ${cs.id} ${cs.status}`,
+              failed: cs.status === "failed",
+              sessionId: cs.id,
+              status: cs.status,
+            };
           },
         },
         options,

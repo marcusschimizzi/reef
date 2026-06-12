@@ -133,7 +133,9 @@ describe("awaiting_subwork suspend", () => {
           throw new Error("must not restart");
         },
         collectSubwork: (runId, toolUseId) =>
-          runId === "run_1" && toolUseId === "tool_1" ? { result: "session result text" } : undefined,
+          runId === "run_1" && toolUseId === "tool_1"
+            ? { result: "session result text", sessionId: "cs_1", status: "paused" }
+            : undefined,
       },
       { resumeApproval: true },
     );
@@ -141,7 +143,9 @@ describe("awaiting_subwork suspend", () => {
     expect(stop).toBe("completed");
     const ctx = spine.getContext("s1");
     const toolMsg = ctx.find((m) => m.role === "tool");
+    // The structured tool_result exposes BOTH the result text and the session id.
     expect(JSON.stringify(toolMsg)).toContain("session result text");
+    expect(JSON.stringify(toolMsg)).toContain("cs_1");
     spine.close();
   });
 
@@ -176,7 +180,9 @@ describe("awaiting_subwork suspend", () => {
           throw new Error("must not restart");
         },
         collectSubwork: (runId, toolUseId) =>
-          runId === "run_1" && toolUseId === "tool_1" ? { result: "boom", failed: true } : undefined,
+          runId === "run_1" && toolUseId === "tool_1"
+            ? { result: "boom", failed: true, sessionId: "cs_1", status: "failed" }
+            : undefined,
       },
       { resumeApproval: true },
     );
@@ -184,10 +190,14 @@ describe("awaiting_subwork suspend", () => {
     expect(stop).toBe("completed");
     const ctx = spine.getContext("s1");
     const toolMsg = ctx.find((m) => m.role === "tool");
-    const blocks = toolMsg!.content as Array<{ toolUseId?: string; output?: string; isError?: boolean }>;
+    const blocks = toolMsg!.content as Array<{ toolUseId?: string; output?: unknown; isError?: boolean }>;
     const block = blocks.find((b) => b.toolUseId === "tool_1");
     expect(block?.isError).toBe(true);
-    expect(block?.output).toContain("boom");
+    // The structured output carries the failure result + session metadata.
+    const output = block?.output as { codingSessionId: string; status: string; result: string };
+    expect(output.result).toBe("boom");
+    expect(output.codingSessionId).toBe("cs_1");
+    expect(output.status).toBe("failed");
     spine.close();
   });
 
@@ -247,6 +257,41 @@ describe("awaiting_subwork suspend", () => {
     const denied = blocks.find((b) => b.toolUseId === "tool_1");
     expect(denied?.isError).toBe(true);
     expect(denied?.output).toContain("denied");
+    spine.close();
+  });
+
+  it("a startSubwork that throws becomes a graceful error tool_result, not a run failure", async () => {
+    const { dir, spine, run, tools, emit } = harness();
+    const toolContext = { fs: new BoundFs(join(dir, "ws")), workspaceRoot: join(dir, "ws") };
+
+    // Turn 1 calls the subwork tool (startSubwork throws); the loop must commit an
+    // error tool_result and continue. Turn 2 is a plain text turn that completes.
+    const stop = await runAgentLoop(run, spine.getAgent("agent_1")!, {
+      spine,
+      router: fakeRouter([
+        { content: [TOOL_USE], stop: "tool_use" },
+        { content: [{ type: "text", text: "ok, recovering" }], stop: "end_turn" },
+      ]),
+      tools,
+      toolContext,
+      emit,
+      startSubwork: async () => {
+        throw new Error("not resumable");
+      },
+      collectSubwork: () => undefined,
+    });
+
+    // The run did NOT suspend for subwork and did NOT fail — it completed.
+    expect(stop).toBe("completed");
+    expect(spine.getRun("run_1")!.status).toBe("completed");
+
+    // The committed tool_result for the subwork tool is an error carrying the message.
+    const ctx = spine.getContext("s1");
+    const toolMsg = ctx.find((m) => m.role === "tool");
+    const blocks = toolMsg!.content as Array<{ toolUseId?: string; output?: string; isError?: boolean }>;
+    const block = blocks.find((b) => b.toolUseId === "tool_1");
+    expect(block?.isError).toBe(true);
+    expect(block?.output).toContain("not resumable");
     spine.close();
   });
 

@@ -81,6 +81,69 @@ function setup() {
   return { daemon, driver, workDir };
 }
 
+/** Build a daemon whose router drives start_coding_session → send_feedback →
+ *  done. Turn 2's send_feedback needs the cs_ id, unknown at scripting time, so
+ *  the router is a stateful closure that reads it from the spine at call time. */
+function setupFeedback() {
+  const dir = tmp();
+  const workDir = tmp();
+  const driver = new FakeDriver();
+  let turn = 0;
+  // The closure router is constructed after the daemon so it can read the spine.
+  let daemonRef: Daemon | undefined;
+  const router: ModelRouter = {
+    async generateTurn(input: ModelTurnInput): Promise<ModelTurn> {
+      turn++;
+      if (turn === 1) {
+        return {
+          stop: "tool_use",
+          content: [
+            { type: "tool_use", id: "tool_1", name: "start_coding_session", input: { directory: workDir, task: "go" } },
+          ],
+          usage: { inputTokens: 5, outputTokens: 2 },
+        };
+      }
+      if (turn === 2) {
+        // Read the just-created coding session id and feed it to send_feedback.
+        const csId = daemonRef!.spine.listCodingSessions()[0].id;
+        return {
+          stop: "tool_use",
+          content: [
+            { type: "tool_use", id: "tool_2", name: "send_feedback", input: { sessionId: csId, text: "do step 2" } },
+          ],
+          usage: { inputTokens: 6, outputTokens: 2 },
+        };
+      }
+      input.onTextDelta?.("all steps done");
+      return {
+        stop: "completed",
+        content: [{ type: "text", text: "all steps done" }],
+        usage: { inputTokens: 8, outputTokens: 2 },
+      };
+    },
+  };
+  const daemon = new Daemon({
+    dbPath: join(dir, "reef.db"),
+    workspaceDir: join(dir, "ws"),
+    codingTraceDir: join(dir, "traces"),
+    router,
+    policy: new AllowPolicy(),
+    codingDriver: driver,
+  });
+  daemonRef = daemon;
+  daemon.registerAgent({ ...agent, toolAllowlist: ["start_coding_session", "send_feedback"] });
+  return { daemon, driver, workDir };
+}
+
+/** A promise that resolves on `run.suspended` for the given run id. */
+function whenRunSuspends(daemon: Daemon, runId: string): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const off = daemon.subscribe((e: ReefEvent) => {
+      if (e.type === "run.suspended" && e.runId === runId) { off(); resolve(); }
+    });
+  });
+}
+
 /** A promise that resolves on `run.completed` for the given run id. */
 function whenRunCompletes(daemon: Daemon, runId: string): Promise<void> {
   return new Promise<void>((resolve) => {
@@ -163,6 +226,43 @@ describe("Daemon coding-session control", () => {
 
     expect(daemon.spine.getRun(run!.id)!.status).toBe("completed");
     // Parked, not terminally done — still revivable via --resume <externalSessionId>.
+    expect(daemon.spine.getCodingSession(cs.id)!.status).toBe("paused");
+    daemon.close();
+  });
+
+  it("send_feedback revives the SAME paused session (re-linked, no new row) and the run completes", async () => {
+    const { daemon, driver } = setupFeedback();
+
+    // Turn 1: start_coding_session → run suspends awaiting_subwork.
+    await daemon.submit({ sessionKey: "s1", agentId: "reef", message: "do the work" });
+    const run = daemon.listRuns({}).find((r) => r.sessionKey === "s1")!;
+    expect(run.stopReason).toBe("awaiting_subwork");
+    const cs = daemon.spine.findCodingSessionBySubwork(run.id, "tool_1")!;
+    expect(cs.status).toBe("running");
+
+    // Cycle 1 handback: marker + die → session parks `paused` → run resumes → turn 2
+    // calls send_feedback → run suspends awaiting_subwork again (SAME session revived).
+    const suspendedAgain = whenRunSuspends(daemon, run.id);
+    driver.handle.feed(`step 1 done\n${HANDBACK_MARKER}\n`);
+    driver.handle.die(143);
+    await suspendedAgain;
+
+    // The revive re-linked the SAME session to turn-2's tool_use — no new row.
+    expect(daemon.spine.listCodingSessions().length).toBe(1);
+    const revived = daemon.spine.getCodingSession(cs.id)!;
+    expect(revived.status).toBe("running");
+    expect(revived.spawningToolUseId).toBe("tool_2");
+    expect(daemon.spine.findCodingSessionBySubwork(run.id, "tool_2")!.id).toBe(cs.id);
+
+    // Cycle 2 handback: marker + die → paused → run resumes → turn 3 text → completes.
+    const completed = whenRunCompletes(daemon, run.id);
+    driver.handle.feed(`step 2 done\n${HANDBACK_MARKER}\n`);
+    driver.handle.die(143);
+    await completed;
+
+    expect(daemon.spine.getRun(run.id)!.status).toBe("completed");
+    // Still exactly one session, parked paused, never a second row.
+    expect(daemon.spine.listCodingSessions().length).toBe(1);
     expect(daemon.spine.getCodingSession(cs.id)!.status).toBe("paused");
     daemon.close();
   });

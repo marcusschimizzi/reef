@@ -35,7 +35,7 @@ export interface LoopDeps {
   startSubwork?: (run: Run, call: ToolUse, source: RunSource) => Promise<string>;
   /** Read a completed subwork's result for (runId, toolUseId); undefined until it
    *  exists and has finished. */
-  collectSubwork?: (runId: string, toolUseId: string) => { result: string; failed?: boolean } | undefined;
+  collectSubwork?: (runId: string, toolUseId: string) => { result: string; failed?: boolean; sessionId: string; status: string } | undefined;
 }
 
 export interface LoopOptions {
@@ -123,7 +123,8 @@ export async function runAgentLoop(
             return "awaiting_subwork";
           }
         } else {
-          commitSubworkStep(spine, run, emit, pending, subworkCall.id, collected.result, collected.failed ?? false);
+          const output = { codingSessionId: collected.sessionId, status: collected.status, result: collected.result };
+          commitSubworkStep(spine, run, emit, pending, subworkCall.id, output, collected.failed ?? false);
           index++;
         }
       } else {
@@ -213,7 +214,21 @@ export async function runAgentLoop(
       const subworkCall = toolUses.find((c) => tools.get(c.name)?.suspendsForSubwork);
       if (subworkCall && toolUses.length === 1 && deps.startSubwork) {
         spine.updateStepOutput(run.id, index, { response: turn.content, usage: turn.usage });
-        await deps.startSubwork(run, subworkCall, source);
+        try {
+          await deps.startSubwork(run, subworkCall, source);
+        } catch (err) {
+          // Subwork failed to start (e.g. send_feedback on a non-resumable session):
+          // give the agent an error tool_result so it can recover; don't fail the run.
+          const message = err instanceof Error ? err.message : String(err);
+          const toolResults: ContentBlock[] = [
+            { type: "tool_result", toolUseId: subworkCall.id, output: message, isError: true },
+          ];
+          spine.appendMessage(run.sessionKey, "tool", toolResults, run.id);
+          spine.commitStep(run.id, index, { response: turn.content, toolResults, usage: turn.usage });
+          emit({ type: "step.committed", index, usage: turn.usage });
+          index++;
+          continue;
+        }
         spine.setRunStatus(run.id, "suspended", { stopReason: "awaiting_subwork" });
         emit({ type: "run.suspended", stopReason: "awaiting_subwork" });
         return "awaiting_subwork";
@@ -386,7 +401,7 @@ function commitSubworkStep(
   emit: (body: ReefEventBody) => void,
   pending: Step,
   subworkToolUseId: string,
-  output: string,
+  output: unknown,
   isError: boolean,
 ): void {
   const toolResults: ContentBlock[] = (pending.response ?? [])
