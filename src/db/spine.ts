@@ -33,6 +33,20 @@ export interface MessageEntry extends Message {
   seq: number;
 }
 
+export interface CodingSessionRecord {
+  id: string;
+  spawningRunId: string | null;
+  agentKind: string;
+  externalSessionId: string;
+  directory: string;
+  status: string;
+  task: string;
+  result?: string;
+  tracePath: string;
+  createdAt: string;
+  endedAt?: string;
+}
+
 // ── row shapes (as stored) ──────────────────────────────────────────────────
 interface AgentRow {
   id: string;
@@ -745,6 +759,42 @@ export class Spine {
       .all(sessionKey, sinceSeq) as Array<{ payload: string }>;
     return rows.map((r) => JSON.parse(r.payload) as ReefEvent);
   }
+
+  // ── coding sessions ───────────────────────────────────────────────────────
+  createCodingSession(rec: Omit<CodingSessionRecord, "createdAt" | "result" | "endedAt">): void {
+    this.db
+      .prepare(
+        `INSERT INTO coding_sessions
+           (id, spawning_run_id, agent_kind, external_session_id, directory, status, task, trace_path, created_at)
+         VALUES (@id, @spawningRunId, @agentKind, @externalSessionId, @directory, @status, @task, @tracePath, @createdAt)`,
+      )
+      .run({ ...rec, createdAt: nowIso() });
+  }
+
+  getCodingSession(id: string): CodingSessionRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM coding_sessions WHERE id = ?`).get(id) as
+      | Record<string, unknown>
+      | undefined;
+    return row ? rowToCodingSession(row) : undefined;
+  }
+
+  setCodingSessionStatus(id: string, status: string, result?: string): void {
+    const terminal = status === "completed" || status === "failed" || status === "cancelled";
+    this.db
+      .prepare(
+        `UPDATE coding_sessions
+            SET status = ?, result = COALESCE(?, result), ended_at = COALESCE(ended_at, ?)
+          WHERE id = ?`,
+      )
+      .run(status, result ?? null, terminal ? nowIso() : null, id);
+  }
+
+  listCodingSessions(): CodingSessionRecord[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM coding_sessions ORDER BY created_at DESC`)
+      .all() as Array<Record<string, unknown>>;
+    return rows.map(rowToCodingSession);
+  }
 }
 
 /** Map a session's latest run to its list-view status. */
@@ -853,5 +903,21 @@ function rowToStep(row: StepRow): Step {
     usage: parse<Usage>(row.usage),
     startedAt: row.started_at,
     committedAt: row.committed_at ?? undefined,
+  };
+}
+
+function rowToCodingSession(row: Record<string, unknown>): CodingSessionRecord {
+  return {
+    id: row.id as string,
+    spawningRunId: (row.spawning_run_id as string | null) ?? null,
+    agentKind: row.agent_kind as string,
+    externalSessionId: row.external_session_id as string,
+    directory: row.directory as string,
+    status: row.status as string,
+    task: row.task as string,
+    result: (row.result as string | null) ?? undefined,
+    tracePath: row.trace_path as string,
+    createdAt: row.created_at as string,
+    endedAt: (row.ended_at as string | null) ?? undefined,
   };
 }

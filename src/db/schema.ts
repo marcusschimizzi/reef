@@ -147,6 +147,23 @@ CREATE TABLE IF NOT EXISTS events (
   ts          INTEGER NOT NULL,
   PRIMARY KEY (session_key, seq)
 );
+
+-- Interactive external coding sessions (Phase: coding-agent control). A session
+-- reef drives over a PTY (Claude Code, etc.); external_session_id is the
+-- reef-minted UUID passed to --session-id, enabling --resume after a lost PTY.
+CREATE TABLE IF NOT EXISTS coding_sessions (
+  id           TEXT PRIMARY KEY,
+  spawning_run_id     TEXT,
+  agent_kind   TEXT NOT NULL,
+  external_session_id TEXT NOT NULL,
+  directory    TEXT NOT NULL,
+  status       TEXT NOT NULL,
+  task         TEXT NOT NULL,
+  result       TEXT,
+  trace_path   TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  ended_at     TEXT
+);
 `;
 
 export function applySchema(db: Database): void {
