@@ -220,20 +220,6 @@ describe("CodingSessionManager", () => {
     expect(driver.lastOpts?.appendSystemPrompt).toContain(HANDBACK_MARKER);
   });
 
-  it("a sentinel marker parks the session paused and tears down the PTY (no completed)", () => {
-    const { spine, events, driver, mgr } = setup(new FakePolicy(() => ({ action: "allow" })));
-    const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
-    driver.handle.feed(`done\n${HANDBACK_MARKER}\n`);
-    // Handback triggers teardown now; `paused` is finalized on the PTY exit (so the
-    // result is read after Claude Code flushes its final message).
-    expect(driver.handle.killed).toBe(true);
-    expect(events.some((e) => e.type === "coding.session.paused")).toBe(false);
-    driver.handle.die(143); // the PTY exits from the handback kill
-    expect(events.find((e) => e.type === "coding.session.paused")).toMatchObject({ codingSessionId: id });
-    expect(spine.getCodingSession(id)!.status).toBe("paused");
-    expect(events.some((e) => e.type === "coding.session.completed")).toBe(false);
-  });
-
   it("idle silence parks the session paused (fallback handback)", () => {
     vi.useFakeTimers();
     try {
@@ -297,11 +283,11 @@ describe("CodingSessionManager", () => {
   });
 
   it("resume() revives a paused session via --resume and re-links the subwork", () => {
-    const { spine, driver, mgr } = setup(new FakePolicy(() => ({ action: "allow" })));
+    const { spine, driver, mgr, getTrigger } = setup(new FakePolicy(() => ({ action: "allow" })));
     const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "step 1" });
     const ext = spine.getCodingSession(id)!.externalSessionId;
-    // Drive it to paused (sentinel marker → handback → kill → paused on exit).
-    driver.handle.feed(`done\n${HANDBACK_MARKER}\n`);
+    // Drive it to paused (Stop-hook signal → handback → kill → paused on exit).
+    getTrigger()!();
     driver.handle.die(143);
     expect(spine.getCodingSession(id)!.status).toBe("paused");
 
@@ -314,9 +300,9 @@ describe("CodingSessionManager", () => {
   });
 
   it("resume() reuses the session's stored model", () => {
-    const { spine, driver, mgr } = setup(new FakePolicy(() => ({ action: "allow" })));
+    const { spine, driver, mgr, getTrigger } = setup(new FakePolicy(() => ({ action: "allow" })));
     const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t", model: "haiku" });
-    driver.handle.feed(`done\n${HANDBACK_MARKER}\n`);
+    getTrigger()!();
     driver.handle.die(143);
     expect(spine.getCodingSession(id)!.status).toBe("paused");
     mgr.resume(id, "again");

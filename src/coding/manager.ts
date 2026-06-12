@@ -25,7 +25,7 @@ import {
   renderTranscript,
 } from "./transcript.js";
 import { TraceWriter } from "./trace.js";
-import { HANDBACK_INSTRUCTION, containsHandback, stripHandback } from "./handback.js";
+import { HANDBACK_INSTRUCTION, stripHandback } from "./handback.js";
 import { buildHandbackSettings } from "./claudeSettings.js";
 
 export interface CodingSessionManagerDeps {
@@ -262,7 +262,10 @@ export class CodingSessionManager {
     l?.trace.write({ type: "event", event: ev });
     if (ev.type === "output") {
       this.emitCoding(id, { type: "coding.output", codingSessionId: id, text: ev.text });
-      if (containsHandback(ev.text)) { this.handback(id, "sentinel"); return; }
+      // Handback is detected by the Stop hook (post-turn-completion) + idle, both of
+      // which fire AFTER Claude Code flushes the turn to its transcript. We do NOT
+      // detect the rendered marker here: it appears pre-flush, so killing on it would
+      // race the transcript write and capture a stale/empty result.
       this.armIdle(id);
     } else if (ev.type === "prompt-pending") {
       this.handlePrompt(id, ev);
@@ -291,7 +294,7 @@ export class CodingSessionManager {
   /** The agent finished this increment (sentinel) or went quiet (idle): capture the
    *  result, park the session `paused` (resumable via --resume), resume the manager
    *  run, and tear down the PTY as a deliberate handback (not a crash/cancel). */
-  private handback(id: string, reason: "sentinel" | "idle" | "stop-hook"): void {
+  private handback(id: string, reason: "idle" | "stop-hook"): void {
     const l = this.live.get(id);
     if (!l || l.handedBack) return;       // latch — once per session
     l.handedBack = true;

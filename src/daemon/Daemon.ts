@@ -76,6 +76,8 @@ export interface DaemonOptions {
   codingDriver?: CodingAgentDriver;
   /** Directory for coding-session flight-recorder traces; defaults to <workspaceDir>/../coding-sessions. */
   codingTraceDir?: string;
+  /** Injectable handback-file watcher for the coding manager (tests trigger handback deterministically). */
+  codingWatchHandbackFile?: (file: string, onSignal: () => void) => () => void;
 }
 
 /** Default self-maintenance instruction for a heartbeat trigger (Phase 4b). */
@@ -178,6 +180,7 @@ export class Daemon {
       driver: opts.codingDriver ?? new PtyClaudeDriver(),
       traceDir: opts.codingTraceDir ?? join(opts.workspaceDir, "..", "coding-sessions"),
       policy: this.policy,
+      watchHandbackFile: opts.codingWatchHandbackFile,
     });
     // Watch our own event stream to route proactive approval requests out to
     // surfaces (and arm their auto-deny deadline). Inert unless a proactive run

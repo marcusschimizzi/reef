@@ -3,7 +3,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Daemon } from "../../src/daemon/Daemon.js";
-import { HANDBACK_MARKER } from "../../src/coding/handback.js";
 import type { CodingAgentDriver, CodingDriverHandle, StartOpts } from "../../src/coding/driver.js";
 import type { ModelRouter, ModelTurn, ModelTurnInput } from "../../src/model/router.js";
 import type { ApprovalPolicy, PolicyContext, PolicyDecision } from "../../src/policy/policy.js";
@@ -56,10 +55,18 @@ function setup() {
   const dir = tmp();
   const workDir = tmp();
   const driver = new FakeDriver();
+  // Fake handback-file watcher: captures onSignal so a test can fire the Stop-hook
+  // signal synchronously (re-armed on each launch → returns the latest onSignal).
+  let triggerStopHook: (() => void) | undefined;
+  const codingWatchHandbackFile = (_file: string, onSignal: () => void) => {
+    triggerStopHook = onSignal;
+    return () => { triggerStopHook = undefined; };
+  };
   const daemon = new Daemon({
     dbPath: join(dir, "reef.db"),
     workspaceDir: join(dir, "ws"),
     codingTraceDir: join(dir, "traces"),
+    codingWatchHandbackFile,
     router: new FakeRouter([
       {
         stop: "tool_use",
@@ -78,7 +85,7 @@ function setup() {
     codingDriver: driver,
   });
   daemon.registerAgent(agent);
-  return { daemon, driver, workDir };
+  return { daemon, driver, workDir, getTrigger: () => triggerStopHook };
 }
 
 /** Build a daemon whose router drives start_coding_session → send_feedback →
@@ -89,6 +96,13 @@ function setupFeedback() {
   const workDir = tmp();
   const driver = new FakeDriver();
   let turn = 0;
+  // Fake handback-file watcher: re-armed on each launch → getTrigger returns the
+  // latest onSignal, so firing it after a resume drives the 2nd handback cycle.
+  let triggerStopHook: (() => void) | undefined;
+  const codingWatchHandbackFile = (_file: string, onSignal: () => void) => {
+    triggerStopHook = onSignal;
+    return () => { triggerStopHook = undefined; };
+  };
   // The closure router is constructed after the daemon so it can read the spine.
   let daemonRef: Daemon | undefined;
   const router: ModelRouter = {
@@ -126,13 +140,14 @@ function setupFeedback() {
     dbPath: join(dir, "reef.db"),
     workspaceDir: join(dir, "ws"),
     codingTraceDir: join(dir, "traces"),
+    codingWatchHandbackFile,
     router,
     policy: new AllowPolicy(),
     codingDriver: driver,
   });
   daemonRef = daemon;
   daemon.registerAgent({ ...agent, toolAllowlist: ["start_coding_session", "send_feedback"] });
-  return { daemon, driver, workDir };
+  return { daemon, driver, workDir, getTrigger: () => triggerStopHook };
 }
 
 /** A promise that resolves on `run.suspended` for the given run id. */
@@ -209,18 +224,18 @@ describe("Daemon coding-session control", () => {
   });
 
   it("handback: the agent emits the marker → session parks `paused` → manager run resumes", async () => {
-    const { daemon, driver } = setup();
+    const { daemon, driver, getTrigger } = setup();
     await daemon.submit({ sessionKey: "s1", agentId: "reef", message: "do the work" });
 
     const run = daemon.listRuns({}).find((r) => r.sessionKey === "s1");
     expect(run!.stopReason).toBe("awaiting_subwork");
     const cs = daemon.spine.findCodingSessionBySubwork(run!.id, "tool_1")!;
 
-    // The agent finishes the increment and prints the handback marker. The manager
-    // parks the session `paused` (resumable) and tears down the PTY; the daemon
-    // resumes the spawning run with the increment result.
+    // The agent finishes the increment; the Stop hook touches the sentinel. The
+    // manager parks the session `paused` (resumable) and tears down the PTY; the
+    // daemon resumes the spawning run with the increment result.
     const completed = whenRunCompletes(daemon, run!.id);
-    driver.handle.feed(`all done\n${HANDBACK_MARKER}\n`);
+    getTrigger()!();
     driver.handle.die(143); // the PTY exits from the deliberate handback kill
     await completed;
 
@@ -231,7 +246,7 @@ describe("Daemon coding-session control", () => {
   });
 
   it("send_feedback revives the SAME paused session (re-linked, no new row) and the run completes", async () => {
-    const { daemon, driver } = setupFeedback();
+    const { daemon, driver, getTrigger } = setupFeedback();
 
     // Turn 1: start_coding_session → run suspends awaiting_subwork.
     await daemon.submit({ sessionKey: "s1", agentId: "reef", message: "do the work" });
@@ -240,10 +255,10 @@ describe("Daemon coding-session control", () => {
     const cs = daemon.spine.findCodingSessionBySubwork(run.id, "tool_1")!;
     expect(cs.status).toBe("running");
 
-    // Cycle 1 handback: marker + die → session parks `paused` → run resumes → turn 2
+    // Cycle 1 handback: Stop hook + die → session parks `paused` → run resumes → turn 2
     // calls send_feedback → run suspends awaiting_subwork again (SAME session revived).
     const suspendedAgain = whenRunSuspends(daemon, run.id);
-    driver.handle.feed(`step 1 done\n${HANDBACK_MARKER}\n`);
+    getTrigger()!();
     driver.handle.die(143);
     await suspendedAgain;
 
@@ -254,9 +269,10 @@ describe("Daemon coding-session control", () => {
     expect(revived.spawningToolUseId).toBe("tool_2");
     expect(daemon.spine.findCodingSessionBySubwork(run.id, "tool_2")!.id).toBe(cs.id);
 
-    // Cycle 2 handback: marker + die → paused → run resumes → turn 3 text → completes.
+    // Cycle 2 handback: the resume re-armed the watcher, so getTrigger() now returns
+    // the new onSignal. Stop hook + die → paused → run resumes → turn 3 text → completes.
     const completed = whenRunCompletes(daemon, run.id);
-    driver.handle.feed(`step 2 done\n${HANDBACK_MARKER}\n`);
+    getTrigger()!();
     driver.handle.die(143);
     await completed;
 
