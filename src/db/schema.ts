@@ -154,6 +154,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE TABLE IF NOT EXISTS coding_sessions (
   id           TEXT PRIMARY KEY,
   spawning_run_id     TEXT,
+  spawning_tool_use_id TEXT,
   agent_kind   TEXT NOT NULL,
   external_session_id TEXT NOT NULL,
   directory    TEXT NOT NULL,
@@ -164,6 +165,26 @@ CREATE TABLE IF NOT EXISTS coding_sessions (
   created_at   TEXT NOT NULL,
   ended_at     TEXT
 );
+
+-- Durable approvals for a coding session's interactive prompts (Step 3). Separate
+-- from \`approvals\` on purpose: these belong to an external PTY session, not a reef
+-- run, so resolving one injects a keystroke into the session rather than re-driving
+-- a run. FKs to coding_sessions, never runs.
+CREATE TABLE IF NOT EXISTS coding_approvals (
+  id                TEXT PRIMARY KEY,
+  coding_session_id TEXT NOT NULL,
+  prompt_text       TEXT NOT NULL,
+  options           TEXT NOT NULL,   -- JSON [{index,label}]
+  tool_name         TEXT NOT NULL,
+  input             TEXT NOT NULL,   -- JSON
+  status            TEXT NOT NULL,   -- pending | allowed | denied
+  decision          TEXT,
+  created_at        TEXT NOT NULL,
+  decided_at        TEXT,
+  expires_at        TEXT,
+  FOREIGN KEY (coding_session_id) REFERENCES coding_sessions(id)
+);
+CREATE INDEX IF NOT EXISTS idx_coding_approvals_session ON coding_approvals(coding_session_id);
 `;
 
 export function applySchema(db: Database): void {
@@ -184,6 +205,7 @@ function migrate(db: Database): void {
   addColumnIfMissing(db, "triggers", "created_by", "TEXT NOT NULL DEFAULT 'operator'");
   addColumnIfMissing(db, "approvals", "expires_at", "TEXT");
   addColumnIfMissing(db, "sessions", "model", "TEXT");
+  addColumnIfMissing(db, "coding_sessions", "spawning_tool_use_id", "TEXT");
 }
 
 function addColumnIfMissing(

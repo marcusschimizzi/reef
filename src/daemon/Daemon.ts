@@ -43,6 +43,7 @@ import { shellTools } from "../tools/shell.js";
 import { memoryTools } from "../tools/memory.js";
 import { scheduleTools } from "../tools/schedule.js";
 import { introspectTools } from "../tools/introspect.js";
+import { codingTools, startCodingSession } from "../tools/coding.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { EventSink } from "./sink.js";
 import { Inbox } from "./inbox.js";
@@ -160,6 +161,7 @@ export class Daemon {
       ...memoryTools,
       ...scheduleTools,
       ...introspectTools,
+      ...codingTools,
     ]) {
       this.tools.register(tool);
     }
@@ -175,6 +177,7 @@ export class Daemon {
       emit: this.sink.emit,
       driver: opts.codingDriver ?? new PtyClaudeDriver(),
       traceDir: opts.codingTraceDir ?? join(opts.workspaceDir, "..", "coding-sessions"),
+      policy: this.policy,
     });
     // Watch our own event stream to route proactive approval requests out to
     // surfaces (and arm their auto-deny deadline). Inert unless a proactive run
@@ -194,6 +197,12 @@ export class Daemon {
     } else if (event.type === "approval.requested") {
       const meta = this.runMeta.get(event.runId);
       if (meta?.proactive) this.routeApproval(event, meta.agentId);
+    } else if (
+      event.type === "coding.session.completed" ||
+      event.type === "coding.session.failed"
+    ) {
+      const cs = this.spine.getCodingSession(event.codingSessionId);
+      if (cs?.spawningRunId) void this.inbox.enqueue({ kind: "resume", runId: cs.spawningRunId });
     }
   }
 
@@ -261,6 +270,28 @@ export class Daemon {
    * the same serial inbox) to execute the decided tools and continue.
    */
   resolveApproval(approvalId: string, decision: string): boolean {
+    // Coding-session approvals resolve into a keystroke injection, not a run resume.
+    const coding = this.spine.getCodingApproval(approvalId);
+    if (coding) {
+      if (coding.status !== "pending") return false;
+      const status: ApprovalStatus = decision === "deny" ? "denied" : "allowed";
+      this.spine.resolveCodingApproval(approvalId, status, decision);
+      this.sink.emit({
+        type: "approval.resolved",
+        sessionKey: `coding:${coding.codingSessionId}`,
+        runId: "",
+        approvalId,
+        decision:
+          decision === "allow-always"
+            ? "allow-always"
+            : decision === "deny"
+              ? "deny"
+              : "allow-once",
+      });
+      this.coding.resolveCodingApproval(approvalId, decision);
+      return true;
+    }
+
     const approval = this.spine.getApproval(approvalId);
     if (!approval || approval.status !== "pending") return false;
     const status: ApprovalStatus = decision === "deny" ? "denied" : "allowed";
@@ -290,12 +321,48 @@ export class Daemon {
     }
   }
 
-  /** Cancel the in-flight run for a session (reef-docs/03 cancellation). */
+  /** Cancel the in-flight run for a session (reef-docs/03 cancellation). Also
+   *  kills any non-terminal coding session spawned by a run on this session — a
+   *  run suspended `awaiting_subwork` has no live aborter, yet its coding session
+   *  keeps running, so aborting the run alone would orphan the PTY. */
   cancel(sessionKey: string): boolean {
+    let killedCoding = false;
+    for (const cs of this.spine.listCodingSessions()) {
+      const spawningRun = cs.spawningRunId ? this.spine.getRun(cs.spawningRunId) : undefined;
+      if (
+        cs.spawningRunId &&
+        spawningRun?.sessionKey === sessionKey &&
+        cs.status !== "completed" &&
+        cs.status !== "failed" &&
+        cs.status !== "cancelled"
+      ) {
+        this.coding.cancel(cs.id);
+        killedCoding = true;
+        // A run suspended awaiting_subwork has no live aborter, so the abort path
+        // below never finalizes it. Mark it terminal here using the same
+        // convention runAgentLoop uses for an aborted run (status "completed",
+        // stopReason "cancelled"), so the post-kill coding.session.completed
+        // resume hits resumeRun's no-suspended guard instead of re-parking it.
+        if (spawningRun.status === "suspended") {
+          this.spine.setRunStatus(cs.spawningRunId, "completed", {
+            stopReason: "cancelled",
+            endedAt: nowIso(),
+          });
+          this.sink.emit({
+            type: "run.completed",
+            stopReason: "cancelled",
+            sessionKey,
+            runId: cs.spawningRunId,
+          });
+        }
+      }
+    }
     const aborter = this.aborters.get(sessionKey);
-    if (!aborter) return false;
-    aborter.abort();
-    return true;
+    if (aborter) {
+      aborter.abort();
+      return true;
+    }
+    return killedCoding;
   }
 
   /** Begin firing triggers on the scheduler's cadence and arm file-watch
@@ -597,7 +664,11 @@ export class Daemon {
 
   private async resumeRun(runId: string): Promise<void> {
     const run = this.spine.getRun(runId);
-    if (!run) return;
+    // Only a still-suspended run resumes. A resume job for a run that already
+    // reached a terminal state (e.g. cancel marked it completed before the
+    // post-kill coding.session.completed enqueued this resume) is a no-op,
+    // rather than re-driving the subwork preamble and re-parking it forever.
+    if (!run || run.status !== "suspended") return;
     this.spine.setRunStatus(runId, "running");
     await this.runLoop({ ...run, status: "running" }, { resumeApproval: true });
   }
@@ -639,6 +710,26 @@ export class Daemon {
           },
           emit: this.sink.emit,
           maxSteps: this.maxSteps,
+          startSubwork: async (r, call, src) => {
+            // Idempotent: if this (run, toolUse) already spawned a session, reuse it
+            // (defends against a duplicate resume re-starting an in-flight session).
+            const existing = this.spine.findCodingSessionBySubwork(r.id, call.id);
+            if (existing) return existing.id;
+            const input = startCodingSession.inputSchema.parse(call.input);
+            return this.coding.start({
+              agentKind: input.agentKind ?? "claude-code",
+              directory: input.directory,
+              task: input.task,
+              spawningRunId: r.id,
+              spawningToolUseId: call.id,
+              source: src,
+            });
+          },
+          collectSubwork: (runId, toolUseId) => {
+            const cs = this.spine.findCodingSessionBySubwork(runId, toolUseId);
+            if (!cs || (cs.status !== "completed" && cs.status !== "failed")) return undefined;
+            return { result: cs.result ?? `coding session ${cs.id} ${cs.status}`, failed: cs.status === "failed" };
+          },
         },
         options,
       );

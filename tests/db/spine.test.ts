@@ -171,4 +171,18 @@ describe("Spine", () => {
     });
     spine.close();
   });
+
+  it("a subwork-suspended run shows as working, not awaiting_approval", () => {
+    const spine = new Spine(tempDbPath());
+    spine.upsertAgent(agent);
+    spine.ensureSession("s_sub", agent.id);
+    spine.appendMessage("s_sub", "user", [{ type: "text", text: "build a feature" }]);
+    const run = spine.createRun({ id: "run_sub", agentId: agent.id, sessionKey: "s_sub" });
+    spine.setRunStatus(run.id, "suspended", { stopReason: "awaiting_subwork" });
+
+    const summary = spine.listSessions().find((s) => s.sessionKey === "s_sub");
+    expect(summary?.status).not.toBe("awaiting_approval");
+    expect(summary?.status).toBe("working");
+    spine.close();
+  });
 });

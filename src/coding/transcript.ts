@@ -27,7 +27,7 @@ export interface TranscriptEntry {
 
 /** The root where Claude Code stores per-project session transcripts. */
 export function claudeProjectsDir(): string {
-  return join(homedir(), ".claude", "projects");
+  return process.env.REEF_CLAUDE_PROJECTS ?? join(homedir(), ".claude", "projects");
 }
 
 /** Claude Code encodes a project's cwd into its transcript-dir name by replacing

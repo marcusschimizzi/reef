@@ -36,6 +36,7 @@ export interface MessageEntry extends Message {
 export interface CodingSessionRecord {
   id: string;
   spawningRunId: string | null;
+  spawningToolUseId: string | null;
   agentKind: string;
   externalSessionId: string;
   directory: string;
@@ -45,6 +46,19 @@ export interface CodingSessionRecord {
   tracePath: string;
   createdAt: string;
   endedAt?: string;
+}
+
+export interface CodingApprovalRecord {
+  id: string;
+  codingSessionId: string;
+  promptText: string;
+  options: { index: number; label: string }[];
+  toolName: string;
+  input: unknown;
+  status: "pending" | "allowed" | "denied";
+  decision?: string;
+  createdAt: string;
+  decidedAt?: string;
 }
 
 // ── row shapes (as stored) ──────────────────────────────────────────────────
@@ -765,8 +779,8 @@ export class Spine {
     this.db
       .prepare(
         `INSERT INTO coding_sessions
-           (id, spawning_run_id, agent_kind, external_session_id, directory, status, task, trace_path, created_at)
-         VALUES (@id, @spawningRunId, @agentKind, @externalSessionId, @directory, @status, @task, @tracePath, @createdAt)`,
+           (id, spawning_run_id, spawning_tool_use_id, agent_kind, external_session_id, directory, status, task, trace_path, created_at)
+         VALUES (@id, @spawningRunId, @spawningToolUseId, @agentKind, @externalSessionId, @directory, @status, @task, @tracePath, @createdAt)`,
       )
       .run({ ...rec, createdAt: nowIso() });
   }
@@ -775,6 +789,13 @@ export class Spine {
     const row = this.db.prepare(`SELECT * FROM coding_sessions WHERE id = ?`).get(id) as
       | Record<string, unknown>
       | undefined;
+    return row ? rowToCodingSession(row) : undefined;
+  }
+
+  findCodingSessionBySubwork(runId: string, toolUseId: string): CodingSessionRecord | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM coding_sessions WHERE spawning_run_id = ? AND spawning_tool_use_id = ?`)
+      .get(runId, toolUseId) as Record<string, unknown> | undefined;
     return row ? rowToCodingSession(row) : undefined;
   }
 
@@ -795,6 +816,47 @@ export class Spine {
       .all() as Array<Record<string, unknown>>;
     return rows.map(rowToCodingSession);
   }
+
+  // ── coding approvals ──────────────────────────────────────────────────────
+  createCodingApproval(rec: {
+    id: string;
+    codingSessionId: string;
+    promptText: string;
+    options: { index: number; label: string }[];
+    toolName: string;
+    input: unknown;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO coding_approvals
+           (id, coding_session_id, prompt_text, options, tool_name, input, status, created_at)
+         VALUES (@id, @codingSessionId, @promptText, @options, @toolName, @input, 'pending', @createdAt)`,
+      )
+      .run({
+        id: rec.id,
+        codingSessionId: rec.codingSessionId,
+        promptText: rec.promptText,
+        options: JSON.stringify(rec.options),
+        toolName: rec.toolName,
+        input: JSON.stringify(rec.input ?? null),
+        createdAt: nowIso(),
+      });
+  }
+
+  getCodingApproval(id: string): CodingApprovalRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM coding_approvals WHERE id = ?`).get(id) as
+      | Record<string, unknown>
+      | undefined;
+    return row ? rowToCodingApproval(row) : undefined;
+  }
+
+  resolveCodingApproval(id: string, status: "allowed" | "denied", decision: string): void {
+    this.db
+      .prepare(
+        `UPDATE coding_approvals SET status = ?, decision = ?, decided_at = ? WHERE id = ?`,
+      )
+      .run(status, decision, nowIso(), id);
+  }
 }
 
 /** Map a session's latest run to its list-view status. */
@@ -803,7 +865,11 @@ function deriveSessionStatus(
 ): SessionStatus {
   if (!latestRun) return "idle";
   if (latestRun.status === "running") return "working";
-  if (latestRun.status === "suspended") return "awaiting_approval";
+  if (latestRun.status === "suspended") {
+    // A subwork suspension means an external coding session is actively running —
+    // it is not waiting on a human approval, so don't show the "awaiting" badge.
+    return latestRun.stop_reason === "awaiting_subwork" ? "working" : "awaiting_approval";
+  }
   if (latestRun.status === "failed") return "failed";
   return "idle";
 }
@@ -910,6 +976,7 @@ function rowToCodingSession(row: Record<string, unknown>): CodingSessionRecord {
   return {
     id: row.id as string,
     spawningRunId: (row.spawning_run_id as string | null) ?? null,
+    spawningToolUseId: (row.spawning_tool_use_id as string | null) ?? null,
     agentKind: row.agent_kind as string,
     externalSessionId: row.external_session_id as string,
     directory: row.directory as string,
@@ -919,5 +986,20 @@ function rowToCodingSession(row: Record<string, unknown>): CodingSessionRecord {
     tracePath: row.trace_path as string,
     createdAt: row.created_at as string,
     endedAt: (row.ended_at as string | null) ?? undefined,
+  };
+}
+
+function rowToCodingApproval(row: Record<string, unknown>): CodingApprovalRecord {
+  return {
+    id: row.id as string,
+    codingSessionId: row.coding_session_id as string,
+    promptText: row.prompt_text as string,
+    options: JSON.parse(row.options as string) as { index: number; label: string }[],
+    toolName: row.tool_name as string,
+    input: JSON.parse(row.input as string),
+    status: row.status as "pending" | "allowed" | "denied",
+    decision: (row.decision as string | null) ?? undefined,
+    createdAt: row.created_at as string,
+    decidedAt: (row.decided_at as string | null) ?? undefined,
   };
 }

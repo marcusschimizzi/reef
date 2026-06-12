@@ -6,6 +6,7 @@ import type {
   Run,
   RunSource,
   RunStatus,
+  Step,
   StopReason,
 } from "../core/types.js";
 import type { Spine } from "../db/spine.js";
@@ -29,6 +30,12 @@ export interface LoopDeps {
   compaction?: CompactionPolicy;
   /** Approval policy governing tool calls; omit for the behavior-preserving default. */
   policy?: ApprovalPolicy;
+  /** Start external subwork for a suspendsForSubwork tool; returns the coding
+   *  session id. Omit to disable subwork (the tool then runs normally). */
+  startSubwork?: (run: Run, call: ToolUse, source: RunSource) => Promise<string>;
+  /** Read a completed subwork's result for (runId, toolUseId); undefined until it
+   *  exists and has finished. */
+  collectSubwork?: (runId: string, toolUseId: string) => { result: string; failed?: boolean } | undefined;
 }
 
 export interface LoopOptions {
@@ -89,10 +96,40 @@ export async function runAgentLoop(
   let stopReason: StopReason = "completed";
 
   try {
-    // Resume preamble: finish the suspended turn whose tools were just decided.
+    // Resume preamble: finish the suspended turn. A pending step holding a
+    // suspendsForSubwork tool is a subwork resume (start-then-resuspend if the
+    // session hasn't finished yet, else commit its result); otherwise it's the
+    // ordinary approval resume.
     if (options.resumeApproval) {
-      if (spine.pendingApprovalCount(run.id) > 0) return "awaiting_approval";
-      if (await finishSuspendedTurn(run, deps, emit, index, source, policy)) index++;
+      const pending = spine.getSteps(run.id).find((s) => s.state === "pending");
+      const subworkCall = pending?.response?.find(
+        (b): b is ToolUse => b.type === "tool_use" && (tools.get(b.name)?.suspendsForSubwork ?? false),
+      );
+      if (pending && subworkCall) {
+        const collected = deps.collectSubwork?.(run.id, subworkCall.id);
+        if (!collected) {
+          const approval = spine
+            .getApprovalsForRun(run.id)
+            .find((a) => a.toolUseId === subworkCall.id);
+          if (approval && approval.status !== "allowed") {
+            // The start was gated and denied — do not launch the session.
+            commitSubworkStep(spine, run, emit, pending, subworkCall.id, "The user denied this action.", true);
+            index++;
+          } else {
+            // Approval was just granted (or never required): start + park.
+            if (deps.startSubwork) await deps.startSubwork(run, subworkCall, source);
+            spine.setRunStatus(run.id, "suspended", { stopReason: "awaiting_subwork" });
+            emit({ type: "run.suspended", stopReason: "awaiting_subwork" });
+            return "awaiting_subwork";
+          }
+        } else {
+          commitSubworkStep(spine, run, emit, pending, subworkCall.id, collected.result, collected.failed ?? false);
+          index++;
+        }
+      } else {
+        if (spine.pendingApprovalCount(run.id) > 0) return "awaiting_approval";
+        if (await finishSuspendedTurn(run, deps, emit, index, source, policy)) index++;
+      }
     }
 
     while (true) {
@@ -167,6 +204,19 @@ export async function runAgentLoop(
         spine.setRunStatus(run.id, "suspended", { stopReason: "awaiting_approval" });
         emit({ type: "run.suspended", stopReason: "awaiting_approval" });
         return "awaiting_approval";
+      }
+
+      // Suspend for subwork: a tool that spawns an external session (a coding
+      // session) starts it now and parks the run until it completes. Checked after
+      // gate so an approval still wins first (the start happens on the post-approval
+      // resume — see the preamble). No-op without a startSubwork hook.
+      const subworkCall = toolUses.find((c) => tools.get(c.name)?.suspendsForSubwork);
+      if (subworkCall && toolUses.length === 1 && deps.startSubwork) {
+        spine.updateStepOutput(run.id, index, { response: turn.content, usage: turn.usage });
+        await deps.startSubwork(run, subworkCall, source);
+        spine.setRunStatus(run.id, "suspended", { stopReason: "awaiting_subwork" });
+        emit({ type: "run.suspended", stopReason: "awaiting_subwork" });
+        return "awaiting_subwork";
       }
 
       let toolResults: ContentBlock[] | undefined;
@@ -325,6 +375,39 @@ async function finishSuspendedTurn(
   });
   emit({ type: "step.committed", index: pending.index, usage: pending.usage });
   return true;
+}
+
+/** Commit a suspended subwork turn: the subwork tool gets `output`; any other
+ *  tool_use in the same turn gets a superseded-error result so the model never
+ *  sees a tool_use without a matching tool_result. */
+function commitSubworkStep(
+  spine: Spine,
+  run: Run,
+  emit: (body: ReefEventBody) => void,
+  pending: Step,
+  subworkToolUseId: string,
+  output: string,
+  isError: boolean,
+): void {
+  const toolResults: ContentBlock[] = (pending.response ?? [])
+    .filter((b): b is ToolUse => b.type === "tool_use")
+    .map((b) =>
+      b.id === subworkToolUseId
+        ? { type: "tool_result", toolUseId: b.id, output, ...(isError ? { isError: true } : {}) }
+        : {
+            type: "tool_result",
+            toolUseId: b.id,
+            output: "Not executed: superseded by the coding session started in this turn.",
+            isError: true,
+          },
+    );
+  spine.appendMessage(run.sessionKey, "tool", toolResults, run.id);
+  spine.commitStep(run.id, pending.index, {
+    response: pending.response!,
+    toolResults,
+    usage: pending.usage,
+  });
+  emit({ type: "step.committed", index: pending.index, usage: pending.usage });
 }
 
 function describeAction(call: ToolUse): string {

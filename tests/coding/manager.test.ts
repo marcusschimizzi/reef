@@ -1,11 +1,19 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Spine } from "../../src/db/spine.js";
 import { CodingSessionManager } from "../../src/coding/manager.js";
+import { encodeProjectPath } from "../../src/coding/transcript.js";
 import type { CodingAgentDriver, CodingDriverHandle, StartOpts } from "../../src/coding/driver.js";
 import type { ReefEvent, ReefEventInit } from "../../src/protocol/events.js";
+import type { ApprovalPolicy, PolicyContext, PolicyDecision } from "../../src/policy/policy.js";
+
+class FakePolicy implements ApprovalPolicy {
+  constructor(private readonly fn: (ctx: PolicyContext) => PolicyDecision) {}
+  last?: PolicyContext;
+  decide(ctx: PolicyContext): PolicyDecision { this.last = ctx; return this.fn(ctx); }
+}
 
 const dirs: string[] = [];
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), "reef-mgr-")); dirs.push(d); return d; };
@@ -26,13 +34,13 @@ class FakeDriver implements CodingAgentDriver {
   start(_opts: StartOpts): CodingDriverHandle { return this.handle; }
 }
 
-function setup() {
+function setup(policy: ApprovalPolicy = new FakePolicy(() => ({ action: "gate" }))) {
   const dir = tmp();
   const spine = new Spine(join(dir, "reef.db"));
   const events: ReefEvent[] = [];
   const emit = (e: ReefEventInit) => events.push({ ...e, seq: events.length, ts: 0 } as ReefEvent);
   const driver = new FakeDriver();
-  const mgr = new CodingSessionManager({ spine, emit, driver, traceDir: join(dir, "traces") });
+  const mgr = new CodingSessionManager({ spine, emit, driver, traceDir: join(dir, "traces"), policy });
   return { spine, events, driver, mgr, dir };
 }
 
@@ -78,6 +86,78 @@ describe("CodingSessionManager", () => {
     mgr.cancel(id);
     driver.handle.die(143); // the PTY exits non-zero from the kill
     expect(spine.getCodingSession(id)!.status).toBe("cancelled");
+  });
+
+  it("policy 'allow' injects the mapped digit + audits + returns to running", () => {
+    const policy = new FakePolicy(() => ({ action: "allow" }));
+    const { spine, driver, mgr } = setup(policy);
+    const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+    driver.handle.feed("Do you want to proceed?\n❯ 1. Yes\n  2. No\n");
+    expect(driver.handle.written).toContain("1\r");
+    expect(spine.getCodingSession(id)!.status).toBe("running");
+    expect(policy.last).toMatchObject({ needsApproval: true, sessionKey: `coding:${id}` });
+  });
+
+  it("an allow decision's audit row links to the spawning run id", () => {
+    const policy = new FakePolicy(() => ({ action: "allow" }));
+    const { spine, driver, mgr } = setup(policy);
+    const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t", spawningRunId: "run_xyz" });
+    driver.handle.feed("Do you want to proceed?\n❯ 1. Yes\n  2. No\n");
+    expect(driver.handle.written).toContain("1\r");
+    const actions = spine.listActions({ runId: "run_xyz" });
+    expect(actions.length).toBe(1);
+    expect(actions[0]!.runId).toBe("run_xyz");
+    expect(spine.listActions({ runId: id })).toEqual([]);
+  });
+
+  it("policy 'deny' injects the No option", () => {
+    const policy = new FakePolicy(() => ({ action: "deny" }));
+    const { driver, mgr } = setup(policy);
+    mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+    driver.handle.feed("Do you want to proceed?\n❯ 1. Yes\n  2. No\n");
+    expect(driver.handle.written).toContain("2\r");
+  });
+
+  it("policy 'gate' writes a coding_approvals row + approval.requested, then waits", () => {
+    const { spine, events, driver, mgr } = setup(); // default policy gates
+    const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+    driver.handle.feed("Do you want to edit a.ts?\n❯ 1. Yes\n  2. No\n");
+    expect(driver.handle.written).toEqual([]); // nothing injected — waiting
+    const req = events.find((e) => e.type === "approval.requested") as { approvalId: string } | undefined;
+    expect(req).toBeTruthy();
+    expect(spine.getCodingApproval(req!.approvalId)!.status).toBe("pending");
+    expect(spine.getCodingSession(id)!.status).toBe("awaiting_decision");
+  });
+
+  it("resolveCodingApproval('allow-once') injects Yes and resolves the row", () => {
+    const { spine, events, driver, mgr } = setup();
+    const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+    driver.handle.feed("Do you want to edit a.ts?\n❯ 1. Yes\n  2. No\n");
+    const req = events.find((e) => e.type === "approval.requested") as { approvalId: string };
+    mgr.resolveCodingApproval(req.approvalId, "allow-once");
+    expect(driver.handle.written).toContain("1\r");
+    expect(spine.getCodingApproval(req.approvalId)!.status).toBe("allowed");
+    expect(spine.getCodingSession(id)!.status).toBe("running");
+  });
+
+  it("on completion, stores the transcript's final assistant text as result", () => {
+    const { spine, driver, mgr, dir } = setup(new FakePolicy(() => ({ action: "allow" })));
+    const root = join(dir, "claude-projects");
+    const workdir = join(dir, "work");
+    mkdirSync(workdir, { recursive: true });
+    const id = mgr.start({ agentKind: "claude-code", directory: workdir, task: "t" });
+    const ext = spine.getCodingSession(id)!.externalSessionId;
+    const tdir = join(root, encodeProjectPath(workdir));
+    mkdirSync(tdir, { recursive: true });
+    writeFileSync(
+      join(tdir, `${ext}.jsonl`),
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "Done: created a.ts" }] } }) + "\n",
+    );
+    // Point the manager's transcript lookup at our temp root.
+    process.env.REEF_CLAUDE_PROJECTS = root;
+    driver.handle.die(0);
+    delete process.env.REEF_CLAUDE_PROJECTS;
+    expect(spine.getCodingSession(id)!.result).toBe("Done: created a.ts");
   });
 
   it("close() kills live sessions and marks them cancelled", () => {
