@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { Daemon } from "../../src/daemon/Daemon.js";
 import type { CodingAgentDriver, CodingDriverHandle, StartOpts } from "../../src/coding/driver.js";
 import type { ModelRouter, ModelTurn, ModelTurnInput } from "../../src/model/router.js";
+import type { ApprovalPolicy, PolicyContext, PolicyDecision } from "../../src/policy/policy.js";
+import type { AgentRecord } from "../../src/core/types.js";
+import type { ReefEvent } from "../../src/protocol/events.js";
 
 const dirs: string[] = [];
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), "reef-dc-")); dirs.push(d); return d; };
@@ -15,8 +18,87 @@ class FakeHandle implements CodingDriverHandle {
   dataCb?: (c: string) => void; exitCb?: (c: number | null) => void; written: string[] = []; killed = false;
   onData(cb: (c: string) => void) { this.dataCb = cb; } onExit(cb: (c: number | null) => void) { this.exitCb = cb; }
   write(d: string) { this.written.push(d); } kill() { this.killed = true; }
+  /** Drive the PTY exit so the manager records the terminal status + emits. */
+  die(code: number | null) { this.exitCb?.(code); }
 }
 class FakeDriver implements CodingAgentDriver { handle = new FakeHandle(); start(_o: StartOpts): CodingDriverHandle { return this.handle; } }
+
+/** Scripted router: hands out turns in order, mirroring tests/daemon/daemon.test.ts. */
+class FakeRouter implements ModelRouter {
+  constructor(private readonly turns: ModelTurn[]) {}
+  async generateTurn(input: ModelTurnInput): Promise<ModelTurn> {
+    const turn = this.turns.shift();
+    if (!turn) throw new Error("FakeRouter: out of turns");
+    for (const b of turn.content) if (b.type === "text") input.onTextDelta?.(b.text);
+    return turn;
+  }
+}
+
+/** Policy that always allows — isolates the subwork suspend from the approval gate. */
+class AllowPolicy implements ApprovalPolicy {
+  decide(_ctx: PolicyContext): PolicyDecision { return { action: "allow" }; }
+}
+
+const agent: AgentRecord = {
+  id: "reef",
+  name: "Reef",
+  systemPrompt: "be helpful",
+  model: "fake",
+  toolAllowlist: ["start_coding_session"],
+};
+
+/** Build a daemon wired for the agent-initiated coding-session flow. The router
+ *  scripts the two turns: turn 1 calls start_coding_session, turn 2 finishes. */
+function setup() {
+  const dir = tmp();
+  const workDir = tmp();
+  const driver = new FakeDriver();
+  const daemon = new Daemon({
+    dbPath: join(dir, "reef.db"),
+    workspaceDir: join(dir, "ws"),
+    codingTraceDir: join(dir, "traces"),
+    router: new FakeRouter([
+      {
+        stop: "tool_use",
+        content: [
+          { type: "tool_use", id: "tool_1", name: "start_coding_session", input: { directory: workDir, task: "go" } },
+        ],
+        usage: { inputTokens: 5, outputTokens: 2 },
+      },
+      {
+        stop: "completed",
+        content: [{ type: "text", text: "subwork done, continuing" }],
+        usage: { inputTokens: 8, outputTokens: 2 },
+      },
+    ]),
+    policy: new AllowPolicy(),
+    codingDriver: driver,
+  });
+  daemon.registerAgent(agent);
+  return { daemon, driver, workDir };
+}
+
+/** A promise that resolves on `run.completed` for the given run id. */
+function whenRunCompletes(daemon: Daemon, runId: string): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const off = daemon.subscribe((e: ReefEvent) => {
+      if (e.type === "run.completed" && e.runId === runId) { off(); resolve(); }
+    });
+  });
+}
+
+/** A promise that resolves when the run next terminates or suspends — used to let
+ *  a cancellation-driven resume job drain before tearing the daemon down. */
+function whenRunSettles(daemon: Daemon, runId: string): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const off = daemon.subscribe((e: ReefEvent) => {
+      if (
+        (e.type === "run.completed" || e.type === "run.failed" || e.type === "run.suspended") &&
+        e.runId === runId
+      ) { off(); resolve(); }
+    });
+  });
+}
 
 describe("Daemon coding-session control", () => {
   it("starts, sends, and cancels a coding session via the daemon API", () => {
@@ -30,5 +112,57 @@ describe("Daemon coding-session control", () => {
     d.cancelCodingSession(id);
     expect(driver.handle.killed).toBe(true);
     d.close();
+  });
+
+  it("end-to-end: an agent starts a coding session, suspends awaiting_subwork, and resumes to completion when it finishes", async () => {
+    const { daemon, driver } = setup();
+
+    // Deliver a user message; the run starts the coding session and parks.
+    await daemon.submit({ sessionKey: "s1", agentId: "reef", message: "do the work" });
+
+    // The run suspended awaiting_subwork, with a coding_sessions row tying back to it.
+    const run = daemon.listRuns({}).find((r) => r.sessionKey === "s1");
+    expect(run).toBeDefined();
+    expect(run!.status).toBe("suspended");
+    expect(run!.stopReason).toBe("awaiting_subwork");
+
+    const cs = daemon.spine.findCodingSessionBySubwork(run!.id, "tool_1");
+    expect(cs).toBeDefined();
+    expect(cs!.spawningRunId).toBe(run!.id);
+    expect(cs!.spawningToolUseId).toBe("tool_1");
+    expect(cs!.status).toBe("running");
+
+    // The PTY exits cleanly → coding.session.completed → daemon enqueues a resume.
+    const completed = whenRunCompletes(daemon, run!.id);
+    driver.handle.die(0);
+    await completed;
+
+    expect(daemon.spine.getRun(run!.id)!.status).toBe("completed");
+    expect(daemon.spine.getCodingSession(cs!.id)!.status).toBe("completed");
+    daemon.close();
+  });
+
+  it("cancel propagates to a coding session spawned by a suspended run", async () => {
+    const { daemon, driver } = setup();
+
+    await daemon.submit({ sessionKey: "s1", agentId: "reef", message: "do the work" });
+    const run = daemon.listRuns({}).find((r) => r.sessionKey === "s1");
+    expect(run!.stopReason).toBe("awaiting_subwork");
+    const cs = daemon.spine.findCodingSessionBySubwork(run!.id, "tool_1")!;
+    expect(cs.status).toBe("running");
+
+    // The suspended run has no live aborter; cancel must still reach the session.
+    daemon.cancel("s1");
+    expect(driver.handle.killed).toBe(true);
+
+    // The kill exits the PTY non-zero → manager records `cancelled`. That exit
+    // also enqueues a resume job for the spawning run; await it draining (it
+    // re-parks, since a cancelled session yields no collectable result) so the
+    // daemon isn't torn down mid-resume.
+    const settled = whenRunSettles(daemon, run!.id);
+    driver.handle.die(143);
+    expect(daemon.spine.getCodingSession(cs.id)!.status).toBe("cancelled");
+    await settled;
+    daemon.close();
   });
 });

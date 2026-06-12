@@ -321,12 +321,30 @@ export class Daemon {
     }
   }
 
-  /** Cancel the in-flight run for a session (reef-docs/03 cancellation). */
+  /** Cancel the in-flight run for a session (reef-docs/03 cancellation). Also
+   *  kills any non-terminal coding session spawned by a run on this session — a
+   *  run suspended `awaiting_subwork` has no live aborter, yet its coding session
+   *  keeps running, so aborting the run alone would orphan the PTY. */
   cancel(sessionKey: string): boolean {
+    let killedCoding = false;
+    for (const cs of this.spine.listCodingSessions()) {
+      if (
+        cs.spawningRunId &&
+        this.spine.getRun(cs.spawningRunId)?.sessionKey === sessionKey &&
+        cs.status !== "completed" &&
+        cs.status !== "failed" &&
+        cs.status !== "cancelled"
+      ) {
+        this.coding.cancel(cs.id);
+        killedCoding = true;
+      }
+    }
     const aborter = this.aborters.get(sessionKey);
-    if (!aborter) return false;
-    aborter.abort();
-    return true;
+    if (aborter) {
+      aborter.abort();
+      return true;
+    }
+    return killedCoding;
   }
 
   /** Begin firing triggers on the scheduler's cadence and arm file-watch
