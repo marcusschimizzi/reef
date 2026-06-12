@@ -8,7 +8,7 @@
 
 import { randomUUID } from "node:crypto";
 import { join, basename, dirname } from "node:path";
-import { existsSync, mkdirSync, writeFileSync, watch as fsWatch } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync, watch as fsWatch } from "node:fs";
 import type { Spine } from "../db/spine.js";
 import type { EmitFn } from "../protocol/events.js";
 import { newActionId, newApprovalId } from "../core/ids.js";
@@ -164,6 +164,9 @@ export class CodingSessionManager {
     const handbackFile = join(this.deps.traceDir, `${id}.handback`);
     const settingsFile = join(this.deps.traceDir, `${id}.settings.json`);
     mkdirSync(this.deps.traceDir, { recursive: true });
+    // Clear any sentinel left by a prior increment so this turn's handback is a
+    // clean file-creation (a revive reuses the same handbackFile path).
+    rmSync(handbackFile, { force: true });
     writeFileSync(settingsFile, JSON.stringify(buildHandbackSettings(handbackFile)));
 
     const handle = this.deps.driver.start({
