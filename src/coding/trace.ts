@@ -18,6 +18,7 @@ export type TraceLine = TraceBody & { t: number };
 
 export class TraceWriter {
   private readonly fd: number;
+  private closed = false;
 
   constructor(private readonly path: string) {
     mkdirSync(dirname(path), { recursive: true });
@@ -25,11 +26,16 @@ export class TraceWriter {
   }
 
   write(body: TraceBody): void {
+    if (this.closed) return; // a late event after close (e.g. a kill race) — drop it
     const line: TraceLine = { t: Date.now(), ...body };
     appendFileSync(this.fd, `${JSON.stringify(line)}\n`);
   }
 
+  /** Idempotent — both the session's exit handler and an external shutdown may
+   *  close the same writer; a double close must not throw EBADF. */
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     closeSync(this.fd);
   }
 }

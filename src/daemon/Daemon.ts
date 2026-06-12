@@ -308,6 +308,7 @@ export class Daemon {
   close(): void {
     this.scheduler.stop();
     this.watcher.stop();
+    this.coding.close(); // kill live coding sessions + close their traces before the spine
     this.spine.close();
   }
 

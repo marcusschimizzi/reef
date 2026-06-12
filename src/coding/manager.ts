@@ -37,6 +37,9 @@ interface Live {
 
 export class CodingSessionManager {
   private readonly live = new Map<string, Live>();
+  /** Sessions whose exit was requested — so the exit handler records `cancelled`
+   *  rather than `failed` (a kill exits the PTY with a non-zero code). */
+  private readonly cancelling = new Set<string>();
   constructor(private readonly deps: CodingSessionManagerDeps) {}
 
   start(opts: StartCodingSession): string {
@@ -74,12 +77,15 @@ export class CodingSessionManager {
     });
     handle.onExit((code) => {
       trace.write({ type: "lifecycle", event: "exit", code });
-      const status = code === 0 || code === null ? "completed" : "failed";
+      // A requested cancel exits non-zero (the kill) — record it as cancelled,
+      // not failed. `delete` both checks membership and consumes the flag.
+      const cancelled = this.cancelling.delete(id);
+      const status = cancelled ? "cancelled" : code === 0 || code === null ? "completed" : "failed";
       this.deps.spine.setCodingSessionStatus(id, status);
-      if (status === "completed") {
-        this.emitCoding(id, { type: "coding.session.completed", codingSessionId: id });
-      } else {
+      if (status === "failed") {
         this.emitCoding(id, { type: "coding.session.failed", codingSessionId: id, error: `exited with code ${code}` });
+      } else {
+        this.emitCoding(id, { type: "coding.session.completed", codingSessionId: id });
       }
       trace.close();
       this.live.delete(id);
@@ -97,7 +103,22 @@ export class CodingSessionManager {
   }
 
   cancel(id: string): void {
-    this.live.get(id)?.handle.kill();
+    if (!this.live.has(id)) return;
+    this.cancelling.add(id);
+    this.live.get(id)!.handle.kill();
+  }
+
+  /** Shut down: kill every live session, mark it cancelled, and close its trace.
+   *  Called on daemon shutdown so no PTY or trace fd is leaked. Idempotent trace
+   *  close means the async exit handler firing afterward is harmless. */
+  close(): void {
+    for (const [id, l] of this.live) {
+      this.cancelling.add(id);
+      this.deps.spine.setCodingSessionStatus(id, "cancelled");
+      l.handle.kill();
+      l.trace.close();
+    }
+    this.live.clear();
   }
 
   private onDriverEvent(id: string, ev: DriverEvent): void {

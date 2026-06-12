@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Spine } from "../../src/db/spine.js";
@@ -42,6 +42,7 @@ describe("CodingSessionManager", () => {
     const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "list files" });
     expect(spine.getCodingSession(id)).toMatchObject({ status: "running", agentKind: "claude-code" });
     expect(events.find((e) => e.type === "coding.session.started")).toMatchObject({ codingSessionId: id });
+    expect(existsSync(spine.getCodingSession(id)!.tracePath)).toBe(true);
   });
 
   it("forwards output and flags a detected prompt (status -> awaiting_decision)", () => {
@@ -69,5 +70,21 @@ describe("CodingSessionManager", () => {
     driver.handle.die(0);
     expect(spine.getCodingSession(id)!.status).toBe("completed");
     expect(events.some((e) => e.type === "coding.session.completed")).toBe(true);
+  });
+
+  it("a cancelled session exits as `cancelled`, not `failed`", () => {
+    const { spine, driver, mgr } = setup();
+    const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+    mgr.cancel(id);
+    driver.handle.die(143); // the PTY exits non-zero from the kill
+    expect(spine.getCodingSession(id)!.status).toBe("cancelled");
+  });
+
+  it("close() kills live sessions and marks them cancelled", () => {
+    const { spine, driver, mgr } = setup();
+    const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+    mgr.close();
+    expect(driver.handle.killed).toBe(true);
+    expect(spine.getCodingSession(id)!.status).toBe("cancelled");
   });
 });
