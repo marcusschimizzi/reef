@@ -98,6 +98,18 @@ describe("CodingSessionManager", () => {
     expect(policy.last).toMatchObject({ needsApproval: true, sessionKey: `coding:${id}` });
   });
 
+  it("an allow decision's audit row links to the spawning run id", () => {
+    const policy = new FakePolicy(() => ({ action: "allow" }));
+    const { spine, driver, mgr } = setup(policy);
+    const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t", spawningRunId: "run_xyz" });
+    driver.handle.feed("Do you want to proceed?\n❯ 1. Yes\n  2. No\n");
+    expect(driver.handle.written).toContain("1\r");
+    const actions = spine.listActions({ runId: "run_xyz" });
+    expect(actions.length).toBe(1);
+    expect(actions[0]!.runId).toBe("run_xyz");
+    expect(spine.listActions({ runId: id })).toEqual([]);
+  });
+
   it("policy 'deny' injects the No option", () => {
     const policy = new FakePolicy(() => ({ action: "deny" }));
     const { driver, mgr } = setup(policy);

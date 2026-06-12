@@ -728,7 +728,7 @@ export class Daemon {
           collectSubwork: (runId, toolUseId) => {
             const cs = this.spine.findCodingSessionBySubwork(runId, toolUseId);
             if (!cs || (cs.status !== "completed" && cs.status !== "failed")) return undefined;
-            return { result: cs.result ?? `coding session ${cs.id} ${cs.status}` };
+            return { result: cs.result ?? `coding session ${cs.id} ${cs.status}`, failed: cs.status === "failed" };
           },
         },
         options,

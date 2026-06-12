@@ -35,7 +35,7 @@ export interface LoopDeps {
   startSubwork?: (run: Run, call: ToolUse, source: RunSource) => Promise<string>;
   /** Read a completed subwork's result for (runId, toolUseId); undefined until it
    *  exists and has finished. */
-  collectSubwork?: (runId: string, toolUseId: string) => { result: string } | undefined;
+  collectSubwork?: (runId: string, toolUseId: string) => { result: string; failed?: boolean } | undefined;
 }
 
 export interface LoopOptions {
@@ -123,7 +123,7 @@ export async function runAgentLoop(
             return "awaiting_subwork";
           }
         } else {
-          commitSubworkStep(spine, run, emit, pending, subworkCall.id, collected.result, false);
+          commitSubworkStep(spine, run, emit, pending, subworkCall.id, collected.result, collected.failed ?? false);
           index++;
         }
       } else {

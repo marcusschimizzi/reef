@@ -168,7 +168,8 @@ export class CodingSessionManager {
       return;
     }
     const dec: Decision = decision.action === "deny" ? "deny" : "allow-once";
-    this.injectAnswer(id, ev.options, dec, ctx, decision.action === "deny" ? "deny" : "allow");
+    const cs = this.deps.spine.getCodingSession(id);
+    this.injectAnswer(id, ev.options, dec, ctx, decision.action === "deny" ? "deny" : "allow", cs?.spawningRunId);
   }
 
   /** Build the policy context, preferring the transcript's reliable tool-use over
@@ -267,6 +268,7 @@ export class CodingSessionManager {
     if (!appr || appr.status !== "pending") return;
     this.deps.spine.resolveCodingApproval(approvalId, decision === "deny" ? "denied" : "allowed", decision);
     const id = appr.codingSessionId;
+    const cs = this.deps.spine.getCodingSession(id);
     const dec: Decision =
       decision === "deny" ? "deny" : decision === "allow-always" ? "allow-always" : "allow-once";
     this.injectAnswer(
@@ -275,6 +277,7 @@ export class CodingSessionManager {
       dec,
       { toolName: appr.toolName, input: appr.input, sessionKey: `coding:${id}` },
       decision === "deny" ? "deny" : "allow",
+      cs?.spawningRunId,
     );
   }
 

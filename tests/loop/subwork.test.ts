@@ -145,6 +145,52 @@ describe("awaiting_subwork suspend", () => {
     spine.close();
   });
 
+  it("resume with a FAILED subwork commits its result as an error tool_result", async () => {
+    const { dir, spine, run, tools, emit } = harness();
+    const toolContext = { fs: new BoundFs(join(dir, "ws")), workspaceRoot: join(dir, "ws") };
+
+    // First pass: suspend.
+    await runAgentLoop(run, spine.getAgent("agent_1")!, {
+      spine,
+      router: fakeRouter([{ content: [TOOL_USE], stop: "tool_use" }]),
+      tools,
+      toolContext,
+      emit,
+      startSubwork: async () => "cs_1",
+      collectSubwork: () => undefined,
+    });
+    expect(spine.getRun("run_1")!.stopReason).toBe("awaiting_subwork");
+
+    // Resume: subwork finished but FAILED.
+    spine.setRunStatus("run_1", "running");
+    const stop = await runAgentLoop(
+      { ...spine.getRun("run_1")!, status: "running" },
+      spine.getAgent("agent_1")!,
+      {
+        spine,
+        router: fakeRouter([{ content: [{ type: "text", text: "noted" }], stop: "end_turn" }]),
+        tools,
+        toolContext,
+        emit,
+        startSubwork: async () => {
+          throw new Error("must not restart");
+        },
+        collectSubwork: (runId, toolUseId) =>
+          runId === "run_1" && toolUseId === "tool_1" ? { result: "boom", failed: true } : undefined,
+      },
+      { resumeApproval: true },
+    );
+
+    expect(stop).toBe("completed");
+    const ctx = spine.getContext("s1");
+    const toolMsg = ctx.find((m) => m.role === "tool");
+    const blocks = toolMsg!.content as Array<{ toolUseId?: string; output?: string; isError?: boolean }>;
+    const block = blocks.find((b) => b.toolUseId === "tool_1");
+    expect(block?.isError).toBe(true);
+    expect(block?.output).toContain("boom");
+    spine.close();
+  });
+
   it("a denied gated subwork does NOT start the session", async () => {
     const { dir, spine, run, tools, events, emit } = harness({ needsApproval: true });
     const toolContext = { fs: new BoundFs(join(dir, "ws")), workspaceRoot: join(dir, "ws") };
