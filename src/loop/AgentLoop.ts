@@ -175,6 +175,19 @@ export async function runAgentLoop(
         return "awaiting_approval";
       }
 
+      // Suspend for subwork: a tool that spawns an external session (a coding
+      // session) starts it now and parks the run until it completes. Checked after
+      // gate so an approval still wins first (the start happens on the post-approval
+      // resume — see the preamble). No-op without a startSubwork hook.
+      const subworkCall = toolUses.find((c) => tools.get(c.name)?.suspendsForSubwork);
+      if (subworkCall && deps.startSubwork) {
+        spine.updateStepOutput(run.id, index, { response: turn.content, usage: turn.usage });
+        await deps.startSubwork(run, subworkCall, source);
+        spine.setRunStatus(run.id, "suspended", { stopReason: "awaiting_subwork" });
+        emit({ type: "run.suspended", stopReason: "awaiting_subwork" });
+        return "awaiting_subwork";
+      }
+
       let toolResults: ContentBlock[] | undefined;
       if (turn.stop === "tool_use" && toolUses.length > 0) {
         toolResults = await executeTools(toolUses, run, deps, emit, source, policy);
