@@ -25,6 +25,7 @@ writeFileSync(join(dir, "NOTES.md"), "# Smoke test\n\nA file for the agent to re
 const spine = new Spine(join(dir, "reef.db"));
 const traceDir = join(dir, "traces");
 let currentId = "";
+let revived = false;
 
 // Allow-all: every detected prompt is auto-answered by reef's policy flow (the
 // thing we're verifying). Swap for DefaultPolicy to exercise the gate path.
@@ -36,16 +37,24 @@ const emit = (e: ReefEventInit): void => {
   if (ev.type === "coding.prompt.detected") {
     process.stdout.write(`\n[reef] PROMPT DETECTED: ${JSON.stringify(ev.options)} — policy deciding…\n`);
   }
-  if (
-    ev.type === "coding.session.paused" ||
-    ev.type === "coding.session.completed" ||
-    ev.type === "coding.session.failed"
-  ) {
+  if (ev.type === "coding.session.paused") {
     const rec = spine.getCodingSession(currentId);
-    process.stdout.write(`\n[reef] session ${ev.type}\n`);
+    process.stdout.write(`\n[reef] HANDBACK #${revived ? 2 : 1} → paused\n`);
     process.stdout.write(`[reef] result: ${rec?.result ?? "(none captured)"}\n`);
-    process.stdout.write(`[reef] status: ${rec?.status}; resumable via --resume ${rec?.externalSessionId}\n`);
-    process.stdout.write(`[reef] trace: ${rec?.tracePath}\n`);
+    if (!revived) {
+      // Live-test send_feedback: revive the SAME session with a follow-up increment.
+      revived = true;
+      process.stdout.write(`[reef] reviving via --resume ${rec?.externalSessionId} with a follow-up…\n`);
+      mgr.resume(currentId, "Now also tell me how many lines NOTES.md has. Do not modify anything.");
+      return;
+    }
+    process.stdout.write(`[reef] both increments done; status: ${rec?.status}\n`);
+    spine.close();
+    process.exit(0);
+  }
+  if (ev.type === "coding.session.completed" || ev.type === "coding.session.failed") {
+    const rec = spine.getCodingSession(currentId);
+    process.stdout.write(`\n[reef] session ${ev.type}; result: ${rec?.result ?? "(none)"}; status: ${rec?.status}\n`);
     spine.close();
     process.exit(0);
   }

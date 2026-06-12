@@ -7,8 +7,8 @@
 // injected so the whole thing is unit-testable without a real PTY.
 
 import { randomUUID } from "node:crypto";
-import { join, basename, dirname } from "node:path";
-import { existsSync, mkdirSync, rmSync, writeFileSync, watch as fsWatch } from "node:fs";
+import { join } from "node:path";
+import { existsSync, mkdirSync, rmSync, writeFileSync, watchFile, unwatchFile } from "node:fs";
 import type { Spine } from "../db/spine.js";
 import type { EmitFn } from "../protocol/events.js";
 import { newActionId, newApprovalId } from "../core/ids.js";
@@ -460,20 +460,17 @@ export class CodingSessionManager {
   }
 }
 
-/** Default handback-file watcher: fs.watch the containing dir for the file
- *  appearing. Best-effort — the idle timer is the ultimate fallback. */
+/** Default handback-file watcher: POLL the sentinel's stat (fs.watchFile). Polling
+ *  is reliable across platforms — fs.watch/FSEvents miss file-creation events on
+ *  macOS, which is why the deterministic Stop-hook path never fired live. The Stop
+ *  hook `touch`ing the file flips it into existence; the poll catches it within the
+ *  interval. The idle timer remains the ultimate fallback. */
 function defaultWatchHandbackFile(file: string, onSignal: () => void): () => void {
-  const dir = dirname(file);
-  const base = basename(file);
   let fired = false;
-  let watcher: ReturnType<typeof fsWatch> | undefined;
-  try {
-    watcher = fsWatch(dir, (_event, fname) => {
-      if (fired) return;
-      if ((fname === base || fname === null) && existsSync(file)) { fired = true; onSignal(); }
-    });
-  } catch {
-    // dir not watchable — rely on idle fallback.
-  }
-  return () => { try { watcher?.close(); } catch { /* already closed */ } };
+  watchFile(file, { interval: 200 }, () => {
+    if (fired || !existsSync(file)) return;
+    fired = true;
+    onSignal();
+  });
+  return () => { try { unwatchFile(file); } catch { /* not watched */ } };
 }
