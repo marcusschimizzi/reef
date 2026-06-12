@@ -6,6 +6,13 @@ import { Spine } from "../../src/db/spine.js";
 import { CodingSessionManager } from "../../src/coding/manager.js";
 import type { CodingAgentDriver, CodingDriverHandle, StartOpts } from "../../src/coding/driver.js";
 import type { ReefEvent, ReefEventInit } from "../../src/protocol/events.js";
+import type { ApprovalPolicy, PolicyContext, PolicyDecision } from "../../src/policy/policy.js";
+
+class FakePolicy implements ApprovalPolicy {
+  constructor(private readonly fn: (ctx: PolicyContext) => PolicyDecision) {}
+  last?: PolicyContext;
+  decide(ctx: PolicyContext): PolicyDecision { this.last = ctx; return this.fn(ctx); }
+}
 
 const dirs: string[] = [];
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), "reef-mgr-")); dirs.push(d); return d; };
@@ -26,13 +33,13 @@ class FakeDriver implements CodingAgentDriver {
   start(_opts: StartOpts): CodingDriverHandle { return this.handle; }
 }
 
-function setup() {
+function setup(policy: ApprovalPolicy = new FakePolicy(() => ({ action: "gate" }))) {
   const dir = tmp();
   const spine = new Spine(join(dir, "reef.db"));
   const events: ReefEvent[] = [];
   const emit = (e: ReefEventInit) => events.push({ ...e, seq: events.length, ts: 0 } as ReefEvent);
   const driver = new FakeDriver();
-  const mgr = new CodingSessionManager({ spine, emit, driver, traceDir: join(dir, "traces") });
+  const mgr = new CodingSessionManager({ spine, emit, driver, traceDir: join(dir, "traces"), policy });
   return { spine, events, driver, mgr, dir };
 }
 
@@ -78,6 +85,24 @@ describe("CodingSessionManager", () => {
     mgr.cancel(id);
     driver.handle.die(143); // the PTY exits non-zero from the kill
     expect(spine.getCodingSession(id)!.status).toBe("cancelled");
+  });
+
+  it("policy 'allow' injects the mapped digit + audits + returns to running", () => {
+    const policy = new FakePolicy(() => ({ action: "allow" }));
+    const { spine, driver, mgr } = setup(policy);
+    const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+    driver.handle.feed("Do you want to proceed?\n❯ 1. Yes\n  2. No\n");
+    expect(driver.handle.written).toContain("1\r");
+    expect(spine.getCodingSession(id)!.status).toBe("running");
+    expect(policy.last).toMatchObject({ needsApproval: true, sessionKey: `coding:${id}` });
+  });
+
+  it("policy 'deny' injects the No option", () => {
+    const policy = new FakePolicy(() => ({ action: "deny" }));
+    const { driver, mgr } = setup(policy);
+    mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+    driver.handle.feed("Do you want to proceed?\n❯ 1. Yes\n  2. No\n");
+    expect(driver.handle.written).toContain("2\r");
   });
 
   it("close() kills live sessions and marks them cancelled", () => {

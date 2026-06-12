@@ -12,7 +12,7 @@ describe("coding_sessions spine", () => {
   it("creates, reads, updates status, and lists", () => {
     const s = spine();
     s.createCodingSession({
-      id: "cs_1", spawningRunId: null, agentKind: "claude-code",
+      id: "cs_1", spawningRunId: null, spawningToolUseId: null, agentKind: "claude-code",
       externalSessionId: "uuid-1", directory: "/tmp/proj", status: "running",
       task: "list files", tracePath: "/tmp/proj/.trace.jsonl",
     });

@@ -10,8 +10,14 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { Spine } from "../db/spine.js";
 import type { EmitFn } from "../protocol/events.js";
+import { newActionId } from "../core/ids.js";
+import { nowIso } from "../core/time.js";
+import type { RunSource } from "../core/types.js";
+import type { ApprovalPolicy } from "../policy/policy.js";
 import { CodingStreamProcessor, type DriverEvent } from "./processor.js";
 import type { CodingAgentDriver, CodingDriverHandle } from "./driver.js";
+import { answerFor, classifyPrompt, promptAction, type Decision } from "./prompts.js";
+import { findClaudeTranscript, latestToolUse, parseClaudeTranscript } from "./transcript.js";
 import { TraceWriter } from "./trace.js";
 
 export interface CodingSessionManagerDeps {
@@ -19,6 +25,7 @@ export interface CodingSessionManagerDeps {
   emit: EmitFn;
   driver: CodingAgentDriver;
   traceDir: string;
+  policy: ApprovalPolicy;
   appendSystemPrompt?: string;
 }
 
@@ -27,12 +34,15 @@ export interface StartCodingSession {
   directory: string;
   task: string;
   spawningRunId?: string | null;
+  spawningToolUseId?: string | null;
+  source?: RunSource;
 }
 
 interface Live {
   handle: CodingDriverHandle;
   processor: CodingStreamProcessor;
   trace: TraceWriter;
+  source: RunSource;
 }
 
 export class CodingSessionManager {
@@ -50,7 +60,7 @@ export class CodingSessionManager {
     this.deps.spine.createCodingSession({
       id,
       spawningRunId: opts.spawningRunId ?? null,
-      spawningToolUseId: null,
+      spawningToolUseId: opts.spawningToolUseId ?? null,
       agentKind: opts.agentKind,
       externalSessionId,
       directory: opts.directory,
@@ -68,7 +78,7 @@ export class CodingSessionManager {
       task: opts.task,
       appendSystemPrompt: this.deps.appendSystemPrompt,
     });
-    this.live.set(id, { handle, processor, trace });
+    this.live.set(id, { handle, processor, trace, source: opts.source ?? { kind: "message" } });
 
     this.emitCoding(id, { type: "coding.session.started", codingSessionId: id, agentKind: opts.agentKind, directory: opts.directory });
 
@@ -128,9 +138,97 @@ export class CodingSessionManager {
     if (ev.type === "output") {
       this.emitCoding(id, { type: "coding.output", codingSessionId: id, text: ev.text });
     } else if (ev.type === "prompt-pending") {
-      this.deps.spine.setCodingSessionStatus(id, "awaiting_decision");
-      this.emitCoding(id, { type: "coding.prompt.detected", codingSessionId: id, promptText: ev.promptText, options: ev.options });
+      this.handlePrompt(id, ev);
     }
+  }
+
+  /** A detected prompt → policy decision → inject (allow/deny) or gate (Task 4). */
+  private handlePrompt(id: string, ev: { promptText: string; options: { index: number; label: string }[] }): void {
+    const l = this.live.get(id);
+    if (!l) return;
+    const ctx = this.promptContext(id, ev.promptText, l.source);
+
+    this.deps.spine.setCodingSessionStatus(id, "awaiting_decision");
+    this.emitCoding(id, {
+      type: "coding.prompt.detected",
+      codingSessionId: id,
+      promptText: ev.promptText,
+      options: ev.options,
+    });
+
+    const decision = this.deps.policy.decide(ctx);
+    if (decision.action === "gate") {
+      this.gate(id, ev, ctx);
+      return;
+    }
+    const dec: Decision = decision.action === "deny" ? "deny" : "allow-once";
+    this.injectAnswer(id, ev.options, dec, ctx, decision.action === "deny" ? "deny" : "allow");
+  }
+
+  /** Build the policy context, preferring the transcript's reliable tool-use over
+   *  the scraped prompt text. */
+  private promptContext(id: string, promptText: string, source: RunSource) {
+    const cs = this.deps.spine.getCodingSession(id)!;
+    const path = findClaudeTranscript(cs.externalSessionId, { cwd: cs.directory });
+    const tool = path ? latestToolUse(parseClaudeTranscript(path)) : undefined;
+    const action = promptAction(promptText);
+    return {
+      agentId: cs.agentKind,
+      toolName: `claude-code:${tool?.name ?? classifyPrompt(promptText)}`,
+      needsApproval: true,
+      input: tool?.input ?? action ?? promptText,
+      source,
+      sessionKey: `coding:${id}`,
+    };
+  }
+
+  /** Map a decision to an option digit and inject it; audit; back to running. */
+  private injectAnswer(
+    id: string,
+    options: { index: number; label: string }[],
+    dec: Decision,
+    ctx: { toolName: string; input: unknown; sessionKey: string },
+    policyAction: "allow" | "deny",
+    spawningRunId?: string | null,
+  ): void {
+    const l = this.live.get(id);
+    if (!l) return;
+    const n = answerFor(options, dec);
+    if (n === undefined) {
+      // No mappable option — leave the prompt for the operator's manual send().
+      l.trace.write({ type: "inject", data: "", reason: `policy:${policyAction}:unmapped` });
+      return;
+    }
+    l.trace.write({ type: "inject", data: `${n}\r`, reason: `policy:${policyAction}` });
+    l.handle.write(`${n}\r`);
+    this.recordAction(id, ctx, policyAction, policyAction === "deny" ? "denied" : "ok", spawningRunId);
+    this.deps.spine.setCodingSessionStatus(id, "running");
+  }
+
+  /** One audit row per coding-session decision (reuses the actions log). */
+  private recordAction(
+    id: string,
+    ctx: { toolName: string; input: unknown },
+    decision: "allow" | "deny",
+    outcome: "ok" | "denied",
+    spawningRunId?: string | null,
+  ): void {
+    this.deps.spine.recordAction({
+      id: newActionId(),
+      runId: spawningRunId ?? id,
+      sessionKey: `coding:${id}`,
+      agentId: "claude-code",
+      toolName: ctx.toolName,
+      input: ctx.input,
+      decision,
+      outcome,
+      createdAt: nowIso(),
+    });
+  }
+
+  /** Task 4 replaces this with the coding_approvals + approval.requested flow. */
+  private gate(id: string, _ev: { promptText: string; options: { index: number; label: string }[] }, _ctx: unknown): void {
+    // Temporary stub: leave status awaiting_decision; the operator's send() answers.
   }
 
   private emitCoding(id: string, body: { type: string } & Record<string, unknown>): void {

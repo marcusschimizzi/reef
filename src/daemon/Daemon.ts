@@ -175,6 +175,7 @@ export class Daemon {
       emit: this.sink.emit,
       driver: opts.codingDriver ?? new PtyClaudeDriver(),
       traceDir: opts.codingTraceDir ?? join(opts.workspaceDir, "..", "coding-sessions"),
+      policy: this.policy,
     });
     // Watch our own event stream to route proactive approval requests out to
     // surfaces (and arm their auto-deny deadline). Inert unless a proactive run
