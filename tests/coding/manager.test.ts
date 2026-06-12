@@ -105,6 +105,28 @@ describe("CodingSessionManager", () => {
     expect(driver.handle.written).toContain("2\r");
   });
 
+  it("policy 'gate' writes a coding_approvals row + approval.requested, then waits", () => {
+    const { spine, events, driver, mgr } = setup(); // default policy gates
+    const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+    driver.handle.feed("Do you want to edit a.ts?\n❯ 1. Yes\n  2. No\n");
+    expect(driver.handle.written).toEqual([]); // nothing injected — waiting
+    const req = events.find((e) => e.type === "approval.requested") as { approvalId: string } | undefined;
+    expect(req).toBeTruthy();
+    expect(spine.getCodingApproval(req!.approvalId)!.status).toBe("pending");
+    expect(spine.getCodingSession(id)!.status).toBe("awaiting_decision");
+  });
+
+  it("resolveCodingApproval('allow-once') injects Yes and resolves the row", () => {
+    const { spine, events, driver, mgr } = setup();
+    const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+    driver.handle.feed("Do you want to edit a.ts?\n❯ 1. Yes\n  2. No\n");
+    const req = events.find((e) => e.type === "approval.requested") as { approvalId: string };
+    mgr.resolveCodingApproval(req.approvalId, "allow-once");
+    expect(driver.handle.written).toContain("1\r");
+    expect(spine.getCodingApproval(req.approvalId)!.status).toBe("allowed");
+    expect(spine.getCodingSession(id)!.status).toBe("running");
+  });
+
   it("close() kills live sessions and marks them cancelled", () => {
     const { spine, driver, mgr } = setup();
     const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });

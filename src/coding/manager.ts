@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { Spine } from "../db/spine.js";
 import type { EmitFn } from "../protocol/events.js";
-import { newActionId } from "../core/ids.js";
+import { newActionId, newApprovalId } from "../core/ids.js";
 import { nowIso } from "../core/time.js";
 import type { RunSource } from "../core/types.js";
 import type { ApprovalPolicy } from "../policy/policy.js";
@@ -226,9 +226,50 @@ export class CodingSessionManager {
     });
   }
 
-  /** Task 4 replaces this with the coding_approvals + approval.requested flow. */
-  private gate(id: string, _ev: { promptText: string; options: { index: number; label: string }[] }, _ctx: unknown): void {
-    // Temporary stub: leave status awaiting_decision; the operator's send() answers.
+  /** Policy gated this prompt: record it durably, surface it, and wait for a human
+   *  resolve (which injects via resolveCodingApproval). */
+  private gate(
+    id: string,
+    ev: { promptText: string; options: { index: number; label: string }[] },
+    ctx: { toolName: string; input: unknown },
+  ): void {
+    const approvalId = newApprovalId();
+    this.deps.spine.createCodingApproval({
+      id: approvalId,
+      codingSessionId: id,
+      promptText: ev.promptText,
+      options: ev.options,
+      toolName: ctx.toolName,
+      input: ctx.input,
+    });
+    this.deps.emit({
+      type: "approval.requested",
+      approvalId,
+      action: ctx.toolName,
+      detail: ctx.input,
+      sessionKey: `coding:${id}`,
+      runId: "",
+    } as Parameters<EmitFn>[0]);
+  }
+
+  /** Resolve a gated coding prompt: inject the mapped digit, audit, resume. Called
+   *  by the daemon's resolveApproval fork (Task 10) — and directly in tests. The
+   *  daemon also flips the row first; the pending guard makes the double-write a
+   *  harmless no-op. */
+  resolveCodingApproval(approvalId: string, decision: string): void {
+    const appr = this.deps.spine.getCodingApproval(approvalId);
+    if (!appr || appr.status !== "pending") return;
+    this.deps.spine.resolveCodingApproval(approvalId, decision === "deny" ? "denied" : "allowed", decision);
+    const id = appr.codingSessionId;
+    const dec: Decision =
+      decision === "deny" ? "deny" : decision === "allow-always" ? "allow-always" : "allow-once";
+    this.injectAnswer(
+      id,
+      appr.options,
+      dec,
+      { toolName: appr.toolName, input: appr.input, sessionKey: `coding:${id}` },
+      decision === "deny" ? "deny" : "allow",
+    );
   }
 
   private emitCoding(id: string, body: { type: string } & Record<string, unknown>): void {
