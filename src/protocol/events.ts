@@ -79,6 +79,20 @@ export type ReefEvent = EventEnvelope &
     // Consumers fold it to update their view; the session's NEXT run reads the
     // new model (an in-flight run already chose its model at start).
     | { type: "session.model.changed"; model: string }
+    // ── coding-agent control (external interactive sessions over a PTY) ───────
+    // A session reef drives (Claude Code, etc.). Carried on a synthetic sessionKey
+    // `coding:<id>` with an empty runId (the session is not a reef run), so it
+    // surfaces in the sessions view and event log like any other session.
+    | { type: "coding.session.started"; codingSessionId: string; agentKind: string; directory: string }
+    | { type: "coding.output"; codingSessionId: string; text: string }
+    | {
+        type: "coding.prompt.detected";
+        codingSessionId: string;
+        promptText: string;
+        options: { index: number; label: string }[];
+      }
+    | { type: "coding.session.completed"; codingSessionId: string; result?: string }
+    | { type: "coding.session.failed"; codingSessionId: string; error: string }
     // ── context management (Phase 3c) ────────────────────────────────────────
     // Emitted when the loop folds older messages into a durable summary to stay
     // under the context window. First-class in the native stream; the conch
