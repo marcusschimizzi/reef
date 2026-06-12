@@ -78,10 +78,13 @@ export class CodingSessionManager {
   /** Sessions killed as a deliberate handback — so `onExit` doesn't re-emit a
    *  completion or override the `paused` status set in handback(). */
   private readonly handingBack = new Set<string>();
-  /** Idle-handback window (ms). Bad env → NaN → falsy → 8000. */
+  /** Idle-handback window (ms): a BACKSTOP for a genuinely-stuck session, not a
+   *  "done" signal (the Stop hook is that, and fires on real completion). Long by
+   *  default so legitimate gaps — model thinking, a slow build, a big grep — don't
+   *  prematurely kill an active session. Bad env → NaN → falsy → default. */
   private readonly idleMs: number;
   constructor(private readonly deps: CodingSessionManagerDeps) {
-    this.idleMs = deps.idleMs ?? (Number(process.env.REEF_CODING_IDLE_MS) || 8000);
+    this.idleMs = deps.idleMs ?? (Number(process.env.REEF_CODING_IDLE_MS) || 300_000);
   }
 
   start(opts: StartCodingSession): string {

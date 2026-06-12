@@ -1,5 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { claudeArgs } from "../../src/coding/ptyClaude.js";
+import { claudeArgs, claudeEnv } from "../../src/coding/ptyClaude.js";
+
+describe("claudeEnv", () => {
+  it("strips API-key credentials so the session bills against the Max plan", () => {
+    process.env.ANTHROPIC_API_KEY = "sk-ant-test";
+    process.env.ANTHROPIC_AUTH_TOKEN = "tok-test";
+    try {
+      const env = claudeEnv();
+      expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+      expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+      expect(env.TERM).toBe("xterm-256color");
+    } finally {
+      delete process.env.ANTHROPIC_API_KEY;
+      delete process.env.ANTHROPIC_AUTH_TOKEN;
+    }
+  });
+});
 
 describe("claudeArgs", () => {
   it("includes --session-id and the task, no --model by default", () => {
