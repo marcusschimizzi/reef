@@ -49,7 +49,7 @@ const TOOL_USE = {
   input: { directory: "/tmp/x", task: "go" },
 };
 
-function harness() {
+function harness(opts: { needsApproval?: boolean } = {}) {
   const dir = tempDir();
   const spine = new Spine(join(dir, "reef.db"));
   spine.upsertAgent(agent);
@@ -62,7 +62,7 @@ function harness() {
     description: "d",
     inputSchema: z.object({ directory: z.string(), task: z.string() }),
     suspendsForSubwork: true,
-    needsApproval: false,
+    needsApproval: opts.needsApproval ?? false,
     run: async () => {
       throw new Error("should not run");
     },
@@ -142,6 +142,109 @@ describe("awaiting_subwork suspend", () => {
     const ctx = spine.getContext("s1");
     const toolMsg = ctx.find((m) => m.role === "tool");
     expect(JSON.stringify(toolMsg)).toContain("session result text");
+    spine.close();
+  });
+
+  it("a denied gated subwork does NOT start the session", async () => {
+    const { dir, spine, run, tools, events, emit } = harness({ needsApproval: true });
+    const toolContext = { fs: new BoundFs(join(dir, "ws")), workspaceRoot: join(dir, "ws") };
+    let started = false;
+
+    // First pass: the tool needs approval, so the run gates.
+    const gateStop = await runAgentLoop(run, spine.getAgent("agent_1")!, {
+      spine,
+      router: fakeRouter([{ content: [TOOL_USE], stop: "tool_use" }]),
+      tools,
+      toolContext,
+      emit,
+      startSubwork: async () => {
+        started = true;
+        return "cs_1";
+      },
+      collectSubwork: () => undefined,
+    });
+    expect(gateStop).toBe("awaiting_approval");
+    expect(started).toBe(false);
+
+    // The human denies.
+    const approval = spine.getApprovalsForRun("run_1").find((a) => a.toolUseId === "tool_1");
+    expect(approval).toBeDefined();
+    spine.resolveApproval(approval!.id, "denied", "deny");
+
+    // Resume after denial: must NOT start the session and must NOT re-suspend.
+    spine.setRunStatus("run_1", "running");
+    const stop = await runAgentLoop(
+      { ...spine.getRun("run_1")!, status: "running" },
+      spine.getAgent("agent_1")!,
+      {
+        spine,
+        router: fakeRouter([{ content: [{ type: "text", text: "ok, stopping" }], stop: "end_turn" }]),
+        tools,
+        toolContext,
+        emit,
+        startSubwork: async () => {
+          throw new Error("must not start a denied session");
+        },
+        collectSubwork: () => undefined,
+      },
+      { resumeApproval: true },
+    );
+
+    expect(started).toBe(false);
+    expect(stop).not.toBe("awaiting_subwork");
+    expect(stop).toBe("completed");
+
+    // The committed tool_result for the subwork tool is the denial (isError).
+    const ctx = spine.getContext("s1");
+    const toolMsg = ctx.find((m) => m.role === "tool");
+    const blocks = toolMsg!.content as Array<{ toolUseId?: string; output?: string; isError?: boolean }>;
+    const denied = blocks.find((b) => b.toolUseId === "tool_1");
+    expect(denied?.isError).toBe(true);
+    expect(denied?.output).toContain("denied");
+    spine.close();
+  });
+
+  it("a multi-tool turn does NOT suspend for subwork (falls through)", async () => {
+    const { dir, spine, run, tools, emit } = harness();
+    tools.register({
+      name: "echo",
+      description: "d",
+      inputSchema: z.object({ msg: z.string() }),
+      needsApproval: false,
+      run: async (input) => `echo: ${(input as { msg: string }).msg}`,
+    });
+    const toolContext = { fs: new BoundFs(join(dir, "ws")), workspaceRoot: join(dir, "ws") };
+
+    const stop = await runAgentLoop(
+      { ...run, agentId: agent.id },
+      { ...spine.getAgent("agent_1")!, toolAllowlist: ["start_coding_session", "echo"] },
+      {
+        spine,
+        router: fakeRouter([
+          {
+            content: [
+              TOOL_USE,
+              { type: "tool_use", id: "tool_2", name: "echo", input: { msg: "hi" } },
+            ],
+            stop: "tool_use",
+          },
+          { content: [{ type: "text", text: "done" }], stop: "end_turn" },
+        ]),
+        tools,
+        toolContext,
+        emit,
+        startSubwork: async () => {
+          throw new Error("must not start subwork for a multi-tool turn");
+        },
+        collectSubwork: () => undefined,
+      },
+    );
+
+    // It fell through to executeTools: the subwork tool's run() throws (clean
+    // error result), echo runs normally — no awaiting_subwork suspension.
+    expect(stop).not.toBe("awaiting_subwork");
+    const ctx = spine.getContext("s1");
+    expect(JSON.stringify(ctx)).toContain("echo: hi");
     spine.close();
   });
 });

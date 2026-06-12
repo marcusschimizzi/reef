@@ -865,7 +865,11 @@ function deriveSessionStatus(
 ): SessionStatus {
   if (!latestRun) return "idle";
   if (latestRun.status === "running") return "working";
-  if (latestRun.status === "suspended") return "awaiting_approval";
+  if (latestRun.status === "suspended") {
+    // A subwork suspension means an external coding session is actively running —
+    // it is not waiting on a human approval, so don't show the "awaiting" badge.
+    return latestRun.stop_reason === "awaiting_subwork" ? "working" : "awaiting_approval";
+  }
   if (latestRun.status === "failed") return "failed";
   return "idle";
 }

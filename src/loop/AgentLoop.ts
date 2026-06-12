@@ -6,6 +6,7 @@ import type {
   Run,
   RunSource,
   RunStatus,
+  Step,
   StopReason,
 } from "../core/types.js";
 import type { Spine } from "../db/spine.js";
@@ -107,23 +108,24 @@ export async function runAgentLoop(
       if (pending && subworkCall) {
         const collected = deps.collectSubwork?.(run.id, subworkCall.id);
         if (!collected) {
-          // Approval was just granted but the session isn't started: start + park.
-          if (deps.startSubwork) await deps.startSubwork(run, subworkCall, source);
-          spine.setRunStatus(run.id, "suspended", { stopReason: "awaiting_subwork" });
-          emit({ type: "run.suspended", stopReason: "awaiting_subwork" });
-          return "awaiting_subwork";
+          const approval = spine
+            .getApprovalsForRun(run.id)
+            .find((a) => a.toolUseId === subworkCall.id);
+          if (approval && approval.status !== "allowed") {
+            // The start was gated and denied — do not launch the session.
+            commitSubworkStep(spine, run, emit, pending, subworkCall.id, "The user denied this action.", true);
+            index++;
+          } else {
+            // Approval was just granted (or never required): start + park.
+            if (deps.startSubwork) await deps.startSubwork(run, subworkCall, source);
+            spine.setRunStatus(run.id, "suspended", { stopReason: "awaiting_subwork" });
+            emit({ type: "run.suspended", stopReason: "awaiting_subwork" });
+            return "awaiting_subwork";
+          }
+        } else {
+          commitSubworkStep(spine, run, emit, pending, subworkCall.id, collected.result, false);
+          index++;
         }
-        const toolResults: ContentBlock[] = [
-          { type: "tool_result", toolUseId: subworkCall.id, output: collected.result },
-        ];
-        spine.appendMessage(run.sessionKey, "tool", toolResults, run.id);
-        spine.commitStep(run.id, pending.index, {
-          response: pending.response!,
-          toolResults,
-          usage: pending.usage,
-        });
-        emit({ type: "step.committed", index: pending.index, usage: pending.usage });
-        index++;
       } else {
         if (spine.pendingApprovalCount(run.id) > 0) return "awaiting_approval";
         if (await finishSuspendedTurn(run, deps, emit, index, source, policy)) index++;
@@ -209,7 +211,7 @@ export async function runAgentLoop(
       // gate so an approval still wins first (the start happens on the post-approval
       // resume — see the preamble). No-op without a startSubwork hook.
       const subworkCall = toolUses.find((c) => tools.get(c.name)?.suspendsForSubwork);
-      if (subworkCall && deps.startSubwork) {
+      if (subworkCall && toolUses.length === 1 && deps.startSubwork) {
         spine.updateStepOutput(run.id, index, { response: turn.content, usage: turn.usage });
         await deps.startSubwork(run, subworkCall, source);
         spine.setRunStatus(run.id, "suspended", { stopReason: "awaiting_subwork" });
@@ -373,6 +375,39 @@ async function finishSuspendedTurn(
   });
   emit({ type: "step.committed", index: pending.index, usage: pending.usage });
   return true;
+}
+
+/** Commit a suspended subwork turn: the subwork tool gets `output`; any other
+ *  tool_use in the same turn gets a superseded-error result so the model never
+ *  sees a tool_use without a matching tool_result. */
+function commitSubworkStep(
+  spine: Spine,
+  run: Run,
+  emit: (body: ReefEventBody) => void,
+  pending: Step,
+  subworkToolUseId: string,
+  output: string,
+  isError: boolean,
+): void {
+  const toolResults: ContentBlock[] = (pending.response ?? [])
+    .filter((b): b is ToolUse => b.type === "tool_use")
+    .map((b) =>
+      b.id === subworkToolUseId
+        ? { type: "tool_result", toolUseId: b.id, output, ...(isError ? { isError: true } : {}) }
+        : {
+            type: "tool_result",
+            toolUseId: b.id,
+            output: "Not executed: superseded by the coding session started in this turn.",
+            isError: true,
+          },
+    );
+  spine.appendMessage(run.sessionKey, "tool", toolResults, run.id);
+  spine.commitStep(run.id, pending.index, {
+    response: pending.response!,
+    toolResults,
+    usage: pending.usage,
+  });
+  emit({ type: "step.committed", index: pending.index, usage: pending.usage });
 }
 
 function describeAction(call: ToolUse): string {
