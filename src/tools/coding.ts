@@ -7,7 +7,7 @@ import type { Tool } from "./types.js";
 // so run() is never executed for effect. needsApproval gates it — a proactive run
 // has no approver and is denied; an interactive run gates for a human OK to spawn.
 const inputSchema = z.object({
-  directory: z.string().describe("Absolute path of the working directory for the session."),
+  directory: z.string().describe("Path of the working directory for the session — an absolute path or one starting with ~ (do not invent a username; use ~ for the home directory)."),
   task: z.string().describe("The task/prompt to give the coding agent."),
   agentKind: z.string().optional().describe("Which coding agent (default: claude-code)."),
   model: z.string().optional().describe("Model for the coding agent (e.g. 'haiku'); default: the agent's own."),

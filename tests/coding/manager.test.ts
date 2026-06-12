@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { Spine } from "../../src/db/spine.js";
 import { CodingSessionManager } from "../../src/coding/manager.js";
@@ -69,6 +69,14 @@ describe("CodingSessionManager", () => {
     expect(spine.getCodingSession(id)).toMatchObject({ status: "running", agentKind: "claude-code" });
     expect(events.find((e) => e.type === "coding.session.started")).toMatchObject({ codingSessionId: id });
     expect(existsSync(spine.getCodingSession(id)!.tracePath)).toBe(true);
+  });
+
+  it("expands a leading ~ and resolves the directory to an absolute path", () => {
+    const { spine, driver, mgr } = setup();
+    const id = mgr.start({ agentKind: "claude-code", directory: "~/dev/push", task: "t" });
+    const expected = join(homedir(), "dev/push");
+    expect(driver.lastOpts?.directory).toBe(expected); // node-pty cwd must be absolute, not "~/…"
+    expect(spine.getCodingSession(id)!.directory).toBe(expected);
   });
 
   it("threads an explicit model to the driver", () => {

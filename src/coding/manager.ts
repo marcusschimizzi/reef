@@ -7,7 +7,8 @@
 // injected so the whole thing is unit-testable without a real PTY.
 
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { existsSync, mkdirSync, rmSync, writeFileSync, watchFile, unwatchFile } from "node:fs";
 import type { Spine } from "../db/spine.js";
 import type { EmitFn } from "../protocol/events.js";
@@ -88,6 +89,10 @@ export class CodingSessionManager {
     const id = `cs_${externalSessionId}`;
     const tracePath = join(this.deps.traceDir, `${id}.jsonl`);
     const model = opts.model ?? process.env.REEF_CODING_MODEL;
+    // Expand `~` and resolve to an absolute path: node-pty's cwd is NOT shell-
+    // expanded, so a literal "~/x" or a relative path makes the spawn fail at
+    // startup (exit 1, zero output). Agents routinely pass "~/...".
+    const directory = resolveCodingDirectory(opts.directory);
 
     this.deps.spine.createCodingSession({
       id,
@@ -95,7 +100,7 @@ export class CodingSessionManager {
       spawningToolUseId: opts.spawningToolUseId ?? null,
       agentKind: opts.agentKind,
       externalSessionId,
-      directory: opts.directory,
+      directory,
       status: "running",
       task: opts.task,
       model,
@@ -105,7 +110,7 @@ export class CodingSessionManager {
     this.launch({
       id,
       externalSessionId,
-      directory: opts.directory,
+      directory,
       task: opts.task,
       model,
       source: opts.source ?? { kind: "message" },
@@ -478,6 +483,14 @@ export class CodingSessionManager {
   private emitCoding(id: string, body: { type: string } & Record<string, unknown>): void {
     this.deps.emit({ ...body, sessionKey: `coding:${id}`, runId: "" } as Parameters<EmitFn>[0]);
   }
+}
+
+/** Expand a leading `~`/`~/` to the home dir and resolve to an absolute path.
+ *  node-pty's cwd is not shell-expanded, so a literal "~/x" (which agents pass
+ *  routinely) or a relative path makes the spawn fail at startup. */
+function resolveCodingDirectory(dir: string): string {
+  const expanded = dir === "~" ? homedir() : dir.startsWith("~/") ? join(homedir(), dir.slice(2)) : dir;
+  return resolve(expanded);
 }
 
 /** Default handback-file watcher: POLL the sentinel's stat (fs.watchFile). Polling
