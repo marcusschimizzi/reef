@@ -24,6 +24,7 @@ import {
   renderTranscript,
 } from "./transcript.js";
 import { TraceWriter } from "./trace.js";
+import { HANDBACK_INSTRUCTION, containsHandback } from "./handback.js";
 
 export interface CodingSessionManagerDeps {
   spine: Spine;
@@ -32,6 +33,8 @@ export interface CodingSessionManagerDeps {
   traceDir: string;
   policy: ApprovalPolicy;
   appendSystemPrompt?: string;
+  /** Idle window (ms) after the last output before the session hands back. */
+  idleMs?: number;
 }
 
 export interface StartCodingSession {
@@ -51,6 +54,9 @@ interface Live {
   processor: CodingStreamProcessor;
   trace: TraceWriter;
   source: RunSource;
+  idleTimer?: ReturnType<typeof setTimeout>;
+  /** Latch: once handed back (sentinel or idle), never act again. */
+  handedBack: boolean;
 }
 
 export class CodingSessionManager {
@@ -58,7 +64,14 @@ export class CodingSessionManager {
   /** Sessions whose exit was requested — so the exit handler records `cancelled`
    *  rather than `failed` (a kill exits the PTY with a non-zero code). */
   private readonly cancelling = new Set<string>();
-  constructor(private readonly deps: CodingSessionManagerDeps) {}
+  /** Sessions killed as a deliberate handback — so `onExit` doesn't re-emit a
+   *  completion or override the `paused` status set in handback(). */
+  private readonly handingBack = new Set<string>();
+  /** Idle-handback window (ms). Bad env → NaN → falsy → 8000. */
+  private readonly idleMs: number;
+  constructor(private readonly deps: CodingSessionManagerDeps) {
+    this.idleMs = deps.idleMs ?? (Number(process.env.REEF_CODING_IDLE_MS) || 8000);
+  }
 
   start(opts: StartCodingSession): string {
     const externalSessionId = randomUUID();
@@ -84,10 +97,10 @@ export class CodingSessionManager {
       directory: opts.directory,
       sessionId: externalSessionId,
       task: opts.task,
-      appendSystemPrompt: this.deps.appendSystemPrompt,
+      appendSystemPrompt: [HANDBACK_INSTRUCTION, this.deps.appendSystemPrompt].filter(Boolean).join("\n\n"),
       model: opts.model ?? process.env.REEF_CODING_MODEL,
     });
-    this.live.set(id, { handle, processor, trace, source: opts.source ?? { kind: "message" } });
+    this.live.set(id, { handle, processor, trace, source: opts.source ?? { kind: "message" }, handedBack: false });
 
     this.emitCoding(id, { type: "coding.session.started", codingSessionId: id, agentKind: opts.agentKind, directory: opts.directory });
 
@@ -97,6 +110,14 @@ export class CodingSessionManager {
     });
     handle.onExit((code) => {
       trace.write({ type: "lifecycle", event: "exit", code });
+      if (this.handingBack.delete(id)) {
+        // Deliberate handback teardown — status/event already set in handback().
+        this.disarmIdle(id);
+        trace.close();
+        this.live.delete(id);
+        return;
+      }
+      this.disarmIdle(id);
       // A requested cancel exits non-zero (the kill) — record it as cancelled,
       // not failed. `delete` both checks membership and consumes the flag.
       const cancelled = this.cancelling.delete(id);
@@ -125,6 +146,7 @@ export class CodingSessionManager {
 
   cancel(id: string): void {
     if (!this.live.has(id)) return;
+    this.disarmIdle(id);
     this.cancelling.add(id);
     this.live.get(id)!.handle.kill();
   }
@@ -134,6 +156,7 @@ export class CodingSessionManager {
    *  close means the async exit handler firing afterward is harmless. */
   close(): void {
     for (const [id, l] of this.live) {
+      this.disarmIdle(id);
       this.cancelling.add(id);
       this.deps.spine.setCodingSessionStatus(id, "cancelled");
       l.handle.kill();
@@ -147,9 +170,39 @@ export class CodingSessionManager {
     l?.trace.write({ type: "event", event: ev });
     if (ev.type === "output") {
       this.emitCoding(id, { type: "coding.output", codingSessionId: id, text: ev.text });
+      if (containsHandback(ev.text)) { this.handback(id, "sentinel"); return; }
+      this.armIdle(id);
     } else if (ev.type === "prompt-pending") {
       this.handlePrompt(id, ev);
     }
+  }
+
+  /** (Re)arm the idle-handback timer for a running session. */
+  private armIdle(id: string): void {
+    const l = this.live.get(id);
+    if (!l) return;
+    if (l.idleTimer) clearTimeout(l.idleTimer);
+    l.idleTimer = setTimeout(() => this.handback(id, "idle"), this.idleMs);
+  }
+  private disarmIdle(id: string): void {
+    const l = this.live.get(id);
+    if (l?.idleTimer) { clearTimeout(l.idleTimer); l.idleTimer = undefined; }
+  }
+
+  /** The agent finished this increment (sentinel) or went quiet (idle): capture the
+   *  result, park the session `paused` (resumable via --resume), resume the manager
+   *  run, and tear down the PTY as a deliberate handback (not a crash/cancel). */
+  private handback(id: string, reason: "sentinel" | "idle"): void {
+    const l = this.live.get(id);
+    if (!l || l.handedBack) return;       // latch — once per session
+    l.handedBack = true;
+    this.disarmIdle(id);
+    l.trace.write({ type: "lifecycle", event: "handback", reason });
+    const result = this.readResult(id);
+    this.deps.spine.setCodingSessionStatus(id, "paused", result);
+    this.emitCoding(id, { type: "coding.session.paused", codingSessionId: id, result });
+    this.handingBack.add(id);
+    l.handle.kill();
   }
 
   /** A detected prompt → policy decision → inject (allow/deny) or gate (Task 4). */
@@ -158,6 +211,8 @@ export class CodingSessionManager {
     if (!l) return;
     const ctx = this.promptContext(id, ev.promptText, l.source);
 
+    // A gated prompt is idle but NOT done — don't let the human deciding trip idle.
+    this.disarmIdle(id);
     this.deps.spine.setCodingSessionStatus(id, "awaiting_decision");
     this.emitCoding(id, {
       type: "coding.prompt.detected",
@@ -214,6 +269,7 @@ export class CodingSessionManager {
     l.handle.write(`${n}\r`);
     this.recordAction(id, ctx, policyAction, policyAction === "deny" ? "denied" : "ok", spawningRunId);
     this.deps.spine.setCodingSessionStatus(id, "running");
+    this.armIdle(id);
   }
 
   /** One audit row per coding-session decision (reuses the actions log). */

@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Spine } from "../../src/db/spine.js";
 import { CodingSessionManager } from "../../src/coding/manager.js";
+import { HANDBACK_MARKER } from "../../src/coding/handback.js";
 import { encodeProjectPath } from "../../src/coding/transcript.js";
 import type { CodingAgentDriver, CodingDriverHandle, StartOpts } from "../../src/coding/driver.js";
 import type { ReefEvent, ReefEventInit } from "../../src/protocol/events.js";
@@ -35,13 +36,13 @@ class FakeDriver implements CodingAgentDriver {
   start(opts: StartOpts): CodingDriverHandle { this.lastOpts = opts; return this.handle; }
 }
 
-function setup(policy: ApprovalPolicy = new FakePolicy(() => ({ action: "gate" }))) {
+function setup(policy: ApprovalPolicy = new FakePolicy(() => ({ action: "gate" })), idleMs?: number) {
   const dir = tmp();
   const spine = new Spine(join(dir, "reef.db"));
   const events: ReefEvent[] = [];
   const emit = (e: ReefEventInit) => events.push({ ...e, seq: events.length, ts: 0 } as ReefEvent);
   const driver = new FakeDriver();
-  const mgr = new CodingSessionManager({ spine, emit, driver, traceDir: join(dir, "traces"), policy });
+  const mgr = new CodingSessionManager({ spine, emit, driver, traceDir: join(dir, "traces"), policy, idleMs });
   return { spine, events, driver, mgr, dir };
 }
 
@@ -195,5 +196,54 @@ describe("CodingSessionManager", () => {
     mgr.close();
     expect(driver.handle.killed).toBe(true);
     expect(spine.getCodingSession(id)!.status).toBe("cancelled");
+  });
+
+  it("injects the handback instruction into the agent's system prompt", () => {
+    const { driver, mgr } = setup();
+    mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+    expect(driver.lastOpts?.appendSystemPrompt).toContain(HANDBACK_MARKER);
+  });
+
+  it("a sentinel marker parks the session paused and tears down the PTY (no completed)", () => {
+    const { spine, events, driver, mgr } = setup(new FakePolicy(() => ({ action: "allow" })));
+    const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+    driver.handle.feed(`done\n${HANDBACK_MARKER}\n`);
+    expect(events.find((e) => e.type === "coding.session.paused")).toMatchObject({ codingSessionId: id });
+    expect(spine.getCodingSession(id)!.status).toBe("paused");
+    expect(driver.handle.killed).toBe(true);
+    expect(events.some((e) => e.type === "coding.session.completed")).toBe(false);
+    // The resulting PTY exit must NOT flip status or emit a completion.
+    driver.handle.die(0);
+    expect(spine.getCodingSession(id)!.status).toBe("paused");
+    expect(events.some((e) => e.type === "coding.session.completed")).toBe(false);
+  });
+
+  it("idle silence parks the session paused (fallback handback)", () => {
+    vi.useFakeTimers();
+    try {
+      const { spine, events, mgr, driver } = setup(new FakePolicy(() => ({ action: "allow" })), 50);
+      const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+      driver.handle.feed("working...\n"); // arms the idle timer
+      vi.advanceTimersByTime(60);
+      expect(events.find((e) => e.type === "coding.session.paused")).toMatchObject({ codingSessionId: id });
+      expect(spine.getCodingSession(id)!.status).toBe("paused");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a gated prompt disarms the idle timer (no handback while a human decides)", () => {
+    vi.useFakeTimers();
+    try {
+      const { spine, events, mgr, driver } = setup(undefined, 50); // default policy gates
+      const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+      driver.handle.feed("working...\n"); // arms idle
+      driver.handle.feed("Do you want to edit a.ts?\n❯ 1. Yes\n  2. No\n"); // gates, disarms idle
+      vi.advanceTimersByTime(100);
+      expect(events.some((e) => e.type === "coding.session.paused")).toBe(false);
+      expect(spine.getCodingSession(id)!.status).toBe("awaiting_decision");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

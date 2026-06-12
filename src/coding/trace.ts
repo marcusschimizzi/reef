@@ -12,7 +12,7 @@ export type TraceBody =
   | { type: "pty.raw"; bytes: string } // base64 of exactly what the agent emitted
   | { type: "event"; event: DriverEvent }
   | { type: "inject"; data: string; reason: string }
-  | { type: "lifecycle"; event: string; code?: number | null };
+  | { type: "lifecycle"; event: string; code?: number | null; reason?: string };
 
 export type TraceLine = TraceBody & { t: number };
 
