@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Daemon } from "../../src/daemon/Daemon.js";
+import { HANDBACK_MARKER } from "../../src/coding/handback.js";
 import type { CodingAgentDriver, CodingDriverHandle, StartOpts } from "../../src/coding/driver.js";
 import type { ModelRouter, ModelTurn, ModelTurnInput } from "../../src/model/router.js";
 import type { ApprovalPolicy, PolicyContext, PolicyDecision } from "../../src/policy/policy.js";
@@ -18,6 +19,8 @@ class FakeHandle implements CodingDriverHandle {
   dataCb?: (c: string) => void; exitCb?: (c: number | null) => void; written: string[] = []; killed = false;
   onData(cb: (c: string) => void) { this.dataCb = cb; } onExit(cb: (c: number | null) => void) { this.exitCb = cb; }
   write(d: string) { this.written.push(d); } kill() { this.killed = true; }
+  /** Push raw output bytes (drives prompt detection + handback). */
+  feed(c: string) { this.dataCb?.(c); }
   /** Drive the PTY exit so the manager records the terminal status + emits. */
   die(code: number | null) { this.exitCb?.(code); }
 }
@@ -139,6 +142,28 @@ describe("Daemon coding-session control", () => {
 
     expect(daemon.spine.getRun(run!.id)!.status).toBe("completed");
     expect(daemon.spine.getCodingSession(cs!.id)!.status).toBe("completed");
+    daemon.close();
+  });
+
+  it("handback: the agent emits the marker → session parks `paused` → manager run resumes", async () => {
+    const { daemon, driver } = setup();
+    await daemon.submit({ sessionKey: "s1", agentId: "reef", message: "do the work" });
+
+    const run = daemon.listRuns({}).find((r) => r.sessionKey === "s1");
+    expect(run!.stopReason).toBe("awaiting_subwork");
+    const cs = daemon.spine.findCodingSessionBySubwork(run!.id, "tool_1")!;
+
+    // The agent finishes the increment and prints the handback marker. The manager
+    // parks the session `paused` (resumable) and tears down the PTY; the daemon
+    // resumes the spawning run with the increment result.
+    const completed = whenRunCompletes(daemon, run!.id);
+    driver.handle.feed(`all done\n${HANDBACK_MARKER}\n`);
+    driver.handle.die(143); // the PTY exits from the deliberate handback kill
+    await completed;
+
+    expect(daemon.spine.getRun(run!.id)!.status).toBe("completed");
+    // Parked, not terminally done — still revivable via --resume <externalSessionId>.
+    expect(daemon.spine.getCodingSession(cs.id)!.status).toBe("paused");
     daemon.close();
   });
 

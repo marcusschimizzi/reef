@@ -36,11 +36,16 @@ const emit = (e: ReefEventInit): void => {
   if (ev.type === "coding.prompt.detected") {
     process.stdout.write(`\n[reef] PROMPT DETECTED: ${JSON.stringify(ev.options)} — policy deciding…\n`);
   }
-  if (ev.type === "coding.session.completed" || ev.type === "coding.session.failed") {
+  if (
+    ev.type === "coding.session.paused" ||
+    ev.type === "coding.session.completed" ||
+    ev.type === "coding.session.failed"
+  ) {
     const rec = spine.getCodingSession(currentId);
     process.stdout.write(`\n[reef] session ${ev.type}\n`);
     process.stdout.write(`[reef] result: ${rec?.result ?? "(none captured)"}\n`);
-    process.stdout.write(`[reef] status: ${rec?.status}; trace: ${rec?.tracePath}\n`);
+    process.stdout.write(`[reef] status: ${rec?.status}; resumable via --resume ${rec?.externalSessionId}\n`);
+    process.stdout.write(`[reef] trace: ${rec?.tracePath}\n`);
     spine.close();
     process.exit(0);
   }

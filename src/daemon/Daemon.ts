@@ -199,8 +199,11 @@ export class Daemon {
       if (meta?.proactive) this.routeApproval(event, meta.agentId);
     } else if (
       event.type === "coding.session.completed" ||
+      event.type === "coding.session.paused" ||
       event.type === "coding.session.failed"
     ) {
+      // A session that finished, handed back (paused), or failed resumes its
+      // spawning manager run with the increment result.
       const cs = this.spine.getCodingSession(event.codingSessionId);
       if (cs?.spawningRunId) void this.inbox.enqueue({ kind: "resume", runId: cs.spawningRunId });
     }
@@ -728,7 +731,9 @@ export class Daemon {
           },
           collectSubwork: (runId, toolUseId) => {
             const cs = this.spine.findCodingSessionBySubwork(runId, toolUseId);
-            if (!cs || (cs.status !== "completed" && cs.status !== "failed")) return undefined;
+            // `paused` = handed back (increment done, resumable); a completable
+            // result for the manager run, like completed/failed.
+            if (!cs || (cs.status !== "completed" && cs.status !== "failed" && cs.status !== "paused")) return undefined;
             return { result: cs.result ?? `coding session ${cs.id} ${cs.status}`, failed: cs.status === "failed" };
           },
         },
