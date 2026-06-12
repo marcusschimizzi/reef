@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Spine } from "../../src/db/spine.js";
@@ -42,8 +42,24 @@ function setup(policy: ApprovalPolicy = new FakePolicy(() => ({ action: "gate" }
   const events: ReefEvent[] = [];
   const emit = (e: ReefEventInit) => events.push({ ...e, seq: events.length, ts: 0 } as ReefEvent);
   const driver = new FakeDriver();
-  const mgr = new CodingSessionManager({ spine, emit, driver, traceDir: join(dir, "traces"), policy, idleMs });
-  return { spine, events, driver, mgr, dir };
+  // Inject a fake handback-file watcher: captures onSignal so a test can fire the
+  // Stop-hook signal synchronously, and tracks dispose so leak-on-teardown is
+  // checkable. Injecting it also keeps every test off the real fs.watch (no leaks).
+  let triggerStopHook: (() => void) | undefined;
+  let disposed = false;
+  const watchHandbackFile = (_file: string, onSignal: () => void) => {
+    triggerStopHook = onSignal;
+    disposed = false;
+    return () => { triggerStopHook = undefined; disposed = true; };
+  };
+  const mgr = new CodingSessionManager({
+    spine, emit, driver, traceDir: join(dir, "traces"), policy, idleMs, watchHandbackFile,
+  });
+  return {
+    spine, events, driver, mgr, dir,
+    getTrigger: () => triggerStopHook,
+    isDisposed: () => disposed,
+  };
 }
 
 describe("CodingSessionManager", () => {
@@ -230,6 +246,49 @@ describe("CodingSessionManager", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("a Stop-hook signal parks the session paused and tears down the PTY (no completed)", () => {
+    const { spine, events, driver, mgr, getTrigger } = setup(new FakePolicy(() => ({ action: "allow" })));
+    const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+    getTrigger()!(); // the Stop hook touched the sentinel → reef's watcher fires
+    expect(events.find((e) => e.type === "coding.session.paused")).toMatchObject({ codingSessionId: id });
+    expect(spine.getCodingSession(id)!.status).toBe("paused");
+    expect(driver.handle.killed).toBe(true);
+    expect(events.some((e) => e.type === "coding.session.completed")).toBe(false);
+  });
+
+  it("passes --settings pointing at a reef-owned Stop-hook settings file", () => {
+    const { driver, mgr } = setup();
+    mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+    const settingsPath = driver.lastOpts?.settingsPath;
+    expect(settingsPath).toMatch(/\.settings\.json$/);
+    expect(existsSync(settingsPath!)).toBe(true);
+    const parsed = JSON.parse(readFileSync(settingsPath!, "utf8")) as {
+      hooks?: { Stop?: Array<{ hooks: Array<{ type: string; command: string }> }> };
+    };
+    const command = parsed.hooks?.Stop?.[0]?.hooks?.[0]?.command;
+    expect(command).toContain("touch");
+    expect(command).toContain(".handback");
+  });
+
+  it("the Stop-hook handback is latched — only one paused event even if it re-fires", () => {
+    const { events, mgr, driver, getTrigger } = setup(new FakePolicy(() => ({ action: "allow" })));
+    mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+    const trigger = getTrigger()!;
+    trigger();
+    // A duplicate Stop touch + a sentinel marker must both be no-ops after the latch.
+    trigger();
+    driver.handle.feed(`done\n${HANDBACK_MARKER}\n`);
+    expect(events.filter((e) => e.type === "coding.session.paused").length).toBe(1);
+  });
+
+  it("disposes the Stop-hook watcher on a normal exit (no leaked fs.watch)", () => {
+    const { driver, mgr, isDisposed } = setup();
+    mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+    expect(isDisposed()).toBe(false);
+    driver.handle.die(0); // normal completion, no handback
+    expect(isDisposed()).toBe(true);
   });
 
   it("a gated prompt disarms the idle timer (no handback while a human decides)", () => {

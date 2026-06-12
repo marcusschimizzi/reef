@@ -17,4 +17,9 @@ describe("claudeArgs", () => {
     const args = claudeArgs({ directory: "/x", sessionId: "u", task: "t", model: "haiku", appendSystemPrompt: "hint" });
     expect(args).toEqual(["--session-id", "u", "--model", "haiku", "--append-system-prompt", "hint", "t"]);
   });
+
+  it("includes --settings before --append-system-prompt when set", () => {
+    const args = claudeArgs({ directory: "/x", sessionId: "u", task: "t", settingsPath: "/tmp/s.json", appendSystemPrompt: "hint" });
+    expect(args).toEqual(["--session-id", "u", "--settings", "/tmp/s.json", "--append-system-prompt", "hint", "t"]);
+  });
 });

@@ -13,6 +13,7 @@ export function claudeArgs(opts: StartOpts): string[] {
   return [
     "--session-id", opts.sessionId,
     ...(opts.model ? ["--model", opts.model] : []),
+    ...(opts.settingsPath ? ["--settings", opts.settingsPath] : []),
     ...(opts.appendSystemPrompt ? ["--append-system-prompt", opts.appendSystemPrompt] : []),
     opts.task,
   ];

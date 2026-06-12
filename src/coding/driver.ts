@@ -14,6 +14,10 @@ export interface StartOpts {
   /** Model for the coding agent (e.g. claude --model haiku). Omitted → the agent's
    *  own default. Lets testing run on a cheap model without burning plan usage. */
   model?: string;
+  /** Path to a settings file passed via `claude --settings` — reef-owned (a temp
+   *  file), never the user's repo. Carries the handback Stop hook (+ future
+   *  pre-auth). Omitted → no `--settings`. */
+  settingsPath?: string;
   /** Override the agent binary path; defaults to the agent's name on PATH. */
   bin?: string;
 }

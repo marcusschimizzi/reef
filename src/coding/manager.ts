@@ -7,7 +7,8 @@
 // injected so the whole thing is unit-testable without a real PTY.
 
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { join, basename, dirname } from "node:path";
+import { existsSync, mkdirSync, writeFileSync, watch as fsWatch } from "node:fs";
 import type { Spine } from "../db/spine.js";
 import type { EmitFn } from "../protocol/events.js";
 import { newActionId, newApprovalId } from "../core/ids.js";
@@ -25,6 +26,7 @@ import {
 } from "./transcript.js";
 import { TraceWriter } from "./trace.js";
 import { HANDBACK_INSTRUCTION, containsHandback } from "./handback.js";
+import { buildHandbackSettings } from "./claudeSettings.js";
 
 export interface CodingSessionManagerDeps {
   spine: Spine;
@@ -35,6 +37,9 @@ export interface CodingSessionManagerDeps {
   appendSystemPrompt?: string;
   /** Idle window (ms) after the last output before the session hands back. */
   idleMs?: number;
+  /** Watch a handback sentinel file for creation; returns a disposer. Injected in
+   *  tests to trigger the signal deterministically. Defaults to an fs watcher. */
+  watchHandbackFile?: (file: string, onSignal: () => void) => () => void;
 }
 
 export interface StartCodingSession {
@@ -57,6 +62,8 @@ interface Live {
   idleTimer?: ReturnType<typeof setTimeout>;
   /** Latch: once handed back (sentinel or idle), never act again. */
   handedBack: boolean;
+  /** Disposer for the Stop-hook sentinel-file watcher; cleared on teardown. */
+  disposeWatch?: () => void;
 }
 
 export class CodingSessionManager {
@@ -93,14 +100,30 @@ export class CodingSessionManager {
     const trace = new TraceWriter(tracePath);
     trace.write({ type: "lifecycle", event: "spawn" });
     const processor = new CodingStreamProcessor();
+
+    // Reef-owned settings + sentinel files live under traceDir (never the user's
+    // repo or ~/.claude). The settings carry a Stop hook that touches the sentinel
+    // when the agent finishes a turn; reef watches it → deterministic handback.
+    const handbackFile = join(this.deps.traceDir, `${id}.handback`);
+    const settingsFile = join(this.deps.traceDir, `${id}.settings.json`);
+    mkdirSync(this.deps.traceDir, { recursive: true });
+    writeFileSync(settingsFile, JSON.stringify(buildHandbackSettings(handbackFile)));
+
     const handle = this.deps.driver.start({
       directory: opts.directory,
       sessionId: externalSessionId,
       task: opts.task,
       appendSystemPrompt: [HANDBACK_INSTRUCTION, this.deps.appendSystemPrompt].filter(Boolean).join("\n\n"),
       model: opts.model ?? process.env.REEF_CODING_MODEL,
+      settingsPath: settingsFile,
     });
     this.live.set(id, { handle, processor, trace, source: opts.source ?? { kind: "message" }, handedBack: false });
+
+    // Arm the Stop-hook watcher: the sentinel appearing → handback("stop-hook").
+    const watch = this.deps.watchHandbackFile ?? defaultWatchHandbackFile;
+    const dispose = watch(handbackFile, () => this.handback(id, "stop-hook"));
+    const l0 = this.live.get(id);
+    if (l0) l0.disposeWatch = dispose;
 
     this.emitCoding(id, { type: "coding.session.started", codingSessionId: id, agentKind: opts.agentKind, directory: opts.directory });
 
@@ -113,11 +136,13 @@ export class CodingSessionManager {
       if (this.handingBack.delete(id)) {
         // Deliberate handback teardown — status/event already set in handback().
         this.disarmIdle(id);
+        this.clearWatch(id);
         trace.close();
         this.live.delete(id);
         return;
       }
       this.disarmIdle(id);
+      this.clearWatch(id);
       // A requested cancel exits non-zero (the kill) — record it as cancelled,
       // not failed. `delete` both checks membership and consumes the flag.
       const cancelled = this.cancelling.delete(id);
@@ -147,6 +172,7 @@ export class CodingSessionManager {
   cancel(id: string): void {
     if (!this.live.has(id)) return;
     this.disarmIdle(id);
+    this.clearWatch(id);
     this.cancelling.add(id);
     this.live.get(id)!.handle.kill();
   }
@@ -157,6 +183,7 @@ export class CodingSessionManager {
   close(): void {
     for (const [id, l] of this.live) {
       this.disarmIdle(id);
+      this.clearWatch(id);
       this.cancelling.add(id);
       this.deps.spine.setCodingSessionStatus(id, "cancelled");
       l.handle.kill();
@@ -189,14 +216,22 @@ export class CodingSessionManager {
     if (l?.idleTimer) { clearTimeout(l.idleTimer); l.idleTimer = undefined; }
   }
 
+  /** Dispose the Stop-hook sentinel watcher so no fs.watch leaks and a late Stop
+   *  touch can't re-enter handback after teardown. */
+  private clearWatch(id: string): void {
+    const l = this.live.get(id);
+    if (l?.disposeWatch) { l.disposeWatch(); l.disposeWatch = undefined; }
+  }
+
   /** The agent finished this increment (sentinel) or went quiet (idle): capture the
    *  result, park the session `paused` (resumable via --resume), resume the manager
    *  run, and tear down the PTY as a deliberate handback (not a crash/cancel). */
-  private handback(id: string, reason: "sentinel" | "idle"): void {
+  private handback(id: string, reason: "sentinel" | "idle" | "stop-hook"): void {
     const l = this.live.get(id);
     if (!l || l.handedBack) return;       // latch — once per session
     l.handedBack = true;
     this.disarmIdle(id);
+    this.clearWatch(id);                  // a late Stop touch can't re-enter
     l.trace.write({ type: "lifecycle", event: "handback", reason });
     const result = this.readResult(id);
     this.deps.spine.setCodingSessionStatus(id, "paused", result);
@@ -358,4 +393,22 @@ export class CodingSessionManager {
   private emitCoding(id: string, body: { type: string } & Record<string, unknown>): void {
     this.deps.emit({ ...body, sessionKey: `coding:${id}`, runId: "" } as Parameters<EmitFn>[0]);
   }
+}
+
+/** Default handback-file watcher: fs.watch the containing dir for the file
+ *  appearing. Best-effort — the idle timer is the ultimate fallback. */
+function defaultWatchHandbackFile(file: string, onSignal: () => void): () => void {
+  const dir = dirname(file);
+  const base = basename(file);
+  let fired = false;
+  let watcher: ReturnType<typeof fsWatch> | undefined;
+  try {
+    watcher = fsWatch(dir, (_event, fname) => {
+      if (fired) return;
+      if ((fname === base || fname === null) && existsSync(file)) { fired = true; onSignal(); }
+    });
+  } catch {
+    // dir not watchable — rely on idle fallback.
+  }
+  return () => { try { watcher?.close(); } catch { /* already closed */ } };
 }
