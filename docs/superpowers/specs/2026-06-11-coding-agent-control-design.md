@@ -255,3 +255,66 @@ Codex (interactive — net-new) and other agents · the structured transport (wh
 tradeoff is acceptable) · concurrent sessions · richer mid-session steering · internal reef→reef
 delegation (A/C) · concurrency (B) · the real broker (E), under which "access to a directory"
 becomes a proper external lease.
+
+---
+
+## Step 3 — resume notes (written after Steps 1–2, to hop back in fast)
+
+**Status:** Steps 1 & 2 are **built, live-verified, committed** on branch `coding-agent-control`
+(NB: that branch is ~67 commits ahead of `main`, which is stuck at the MCP-era merge — the whole
+agent pivot is unmerged; decide the merge story separately). All offline tests green.
+
+### What's already built that Step 3 just wires together
+- `src/coding/scrape.ts` + `render.ts` + `processor.ts` — the PTY scrape: render the screen,
+  detect a prompt, parse clean option labels, debounced. **Detection works** (proven against real
+  fixtures). Step 3 does **not** need to touch scraping.
+- `src/coding/prompts.ts` — `classifyPrompt(text)→trust|permission|plan|question`,
+  `promptAction(text)` (the "Do you want to X?" clause), `answerFor(options, decision)→option
+  index by label`. **These exist and are tested** — Step 3 calls them.
+- `src/coding/transcript.ts` — read Claude Code's own session JSONL; `latestToolUse(entries)` is
+  the **reliable approval action** ("Write summary.txt"). Locate by minted session-id.
+- `src/coding/manager.ts` — on a PTY `prompt-pending` it currently sets status
+  `awaiting_decision` and emits `coding.prompt.detected`, leaving the answer to the operator's
+  `send()`. **This is the exact hook Step 3 replaces** with the policy flow below.
+
+### The Step-3 approval flow (concrete)
+On `prompt-pending` in the manager:
+1. Build an `ApprovalContext`: `tool_name = "claude-code:" + (latestToolUse.name ?? classifyPrompt)`,
+   `input = latestToolUse.input` (reliable, from the JSONL) **or** the scraped `promptAction`
+   (fallback), `source` = the run's source.
+2. `policy.decide(ctx)` → **allow**: `answerFor(options, "allow-once")` → `manager.send(id, "${n}\r")`
+   + audit row. **gate**: create an `approvals` row + fire surfaces; session waits at its TUI
+   prompt; on human resolve → `answerFor(options, decision)` → inject. **deny**: inject the No option.
+3. Every decision writes an `actions` audit row (reuse the existing audit path).
+
+### The two genuinely-new pieces
+- **`awaiting_subwork` suspend/resume** (reserved `StopReason`, still unimplemented). **Mirror the
+  existing approval suspend/resume in `AgentLoop`** (`b7786ed` shipped suspend-for-approval:
+  emit → persist → set run suspended → resume job re-drives). Step 3 adds a suspend-for-subwork
+  variant: the manager run suspends when it starts a coding session, resumes on session completion.
+- **The agent `start_coding_session` tool** — the agent-initiated path. The **operator** path
+  (socket `coding_start`) already works; the tool wraps `Daemon.startCodingSession` and suspends
+  the calling run.
+
+### KEY INSIGHT — no deadlock here (unlike internal reef→reef delegation)
+The coding session is an **external subprocess**, not a reef run on the serial inbox. So when the
+manager run suspends (`awaiting_subwork`), the PTY session keeps running **on its own** and reef's
+inbox is free. The "alternate via suspend/resume" works **without** the serial-queue deadlock that
+internal delegation (sub-project C) has to solve. This is why F is a good first slice.
+
+### Live findings that re-prioritize Step 3
+- **The user's Claude Code is permissive** — plain Bash (`echo`) ran with **no** prompt; only
+  edits/writes prompted. So in practice **approval prompts are rare**; the auto-answer path is
+  lightly exercised and **`.claude/settings.json` pre-auth is lower-value than expected** (their
+  config already pre-authorizes much of the dev loop). Prioritize the agent tool + suspend/resume
+  + the JSONL-driven observability over pre-auth.
+- **Weekly plan limit** was at ~85% (resets ~Jun 15) — capture live sparingly; lean on the
+  committed fixtures (`tests/coding/fixtures/{trust-prompt,edit-approval,claude-session}.jsonl`)
+  and `replayTrace`, which need no Claude spend.
+- The DEEP JSONL integration (manager **live-tails** the JSONL → emit clean `coding.output` from
+  it instead of the garbled PTY stream; reuse the file-watch seam) lands here too.
+
+### First concrete move for Step 3
+Replace the manager's `prompt-pending` hook with the policy flow above (using a fake driver +
+the committed fixtures to test it), THEN add `awaiting_subwork` + the agent tool. Dev aids:
+`scripts/{capture-fixture,trace-inspect,trace-raw,coding-session-smoke}.ts`.
