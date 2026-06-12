@@ -30,3 +30,9 @@ export const HANDBACK_INSTRUCTION =
 export function containsHandback(text: string): boolean {
   return text.includes(HANDBACK_MARKER);
 }
+
+/** Remove the handback marker (and the surrounding blank space) from a captured
+ *  result, so the increment summary doesn't carry reef's protocol token. */
+export function stripHandback(text: string): string {
+  return text.split(HANDBACK_MARKER).join("").trim();
+}

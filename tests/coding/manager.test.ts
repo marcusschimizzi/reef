@@ -224,12 +224,12 @@ describe("CodingSessionManager", () => {
     const { spine, events, driver, mgr } = setup(new FakePolicy(() => ({ action: "allow" })));
     const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
     driver.handle.feed(`done\n${HANDBACK_MARKER}\n`);
-    expect(events.find((e) => e.type === "coding.session.paused")).toMatchObject({ codingSessionId: id });
-    expect(spine.getCodingSession(id)!.status).toBe("paused");
+    // Handback triggers teardown now; `paused` is finalized on the PTY exit (so the
+    // result is read after Claude Code flushes its final message).
     expect(driver.handle.killed).toBe(true);
-    expect(events.some((e) => e.type === "coding.session.completed")).toBe(false);
-    // The resulting PTY exit must NOT flip status or emit a completion.
-    driver.handle.die(0);
+    expect(events.some((e) => e.type === "coding.session.paused")).toBe(false);
+    driver.handle.die(143); // the PTY exits from the handback kill
+    expect(events.find((e) => e.type === "coding.session.paused")).toMatchObject({ codingSessionId: id });
     expect(spine.getCodingSession(id)!.status).toBe("paused");
     expect(events.some((e) => e.type === "coding.session.completed")).toBe(false);
   });
@@ -240,7 +240,9 @@ describe("CodingSessionManager", () => {
       const { spine, events, mgr, driver } = setup(new FakePolicy(() => ({ action: "allow" })), 50);
       const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
       driver.handle.feed("working...\n"); // arms the idle timer
-      vi.advanceTimersByTime(60);
+      vi.advanceTimersByTime(60); // idle fires → handback → kill
+      expect(driver.handle.killed).toBe(true);
+      driver.handle.die(143); // exit finalizes paused
       expect(events.find((e) => e.type === "coding.session.paused")).toMatchObject({ codingSessionId: id });
       expect(spine.getCodingSession(id)!.status).toBe("paused");
     } finally {
@@ -252,9 +254,11 @@ describe("CodingSessionManager", () => {
     const { spine, events, driver, mgr, getTrigger } = setup(new FakePolicy(() => ({ action: "allow" })));
     const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
     getTrigger()!(); // the Stop hook touched the sentinel → reef's watcher fires
+    expect(driver.handle.killed).toBe(true);
+    expect(events.some((e) => e.type === "coding.session.paused")).toBe(false);
+    driver.handle.die(143); // exit finalizes paused
     expect(events.find((e) => e.type === "coding.session.paused")).toMatchObject({ codingSessionId: id });
     expect(spine.getCodingSession(id)!.status).toBe("paused");
-    expect(driver.handle.killed).toBe(true);
     expect(events.some((e) => e.type === "coding.session.completed")).toBe(false);
   });
 
@@ -280,6 +284,7 @@ describe("CodingSessionManager", () => {
     // A duplicate Stop touch + a sentinel marker must both be no-ops after the latch.
     trigger();
     driver.handle.feed(`done\n${HANDBACK_MARKER}\n`);
+    driver.handle.die(143); // one exit → exactly one paused
     expect(events.filter((e) => e.type === "coding.session.paused").length).toBe(1);
   });
 

@@ -25,7 +25,7 @@ import {
   renderTranscript,
 } from "./transcript.js";
 import { TraceWriter } from "./trace.js";
-import { HANDBACK_INSTRUCTION, containsHandback } from "./handback.js";
+import { HANDBACK_INSTRUCTION, containsHandback, stripHandback } from "./handback.js";
 import { buildHandbackSettings } from "./claudeSettings.js";
 
 export interface CodingSessionManagerDeps {
@@ -134,9 +134,14 @@ export class CodingSessionManager {
     handle.onExit((code) => {
       trace.write({ type: "lifecycle", event: "exit", code });
       if (this.handingBack.delete(id)) {
-        // Deliberate handback teardown — status/event already set in handback().
+        // Deliberate handback: the PTY has now exited and the transcript is flushed,
+        // so capture the increment result here and park the session `paused`
+        // (resumable). The non-zero exit code from the kill is expected — ignore it.
         this.disarmIdle(id);
         this.clearWatch(id);
+        const result = this.readResult(id);
+        this.deps.spine.setCodingSessionStatus(id, "paused", result);
+        this.emitCoding(id, { type: "coding.session.paused", codingSessionId: id, result });
         trace.close();
         this.live.delete(id);
         return;
@@ -233,9 +238,9 @@ export class CodingSessionManager {
     this.disarmIdle(id);
     this.clearWatch(id);                  // a late Stop touch can't re-enter
     l.trace.write({ type: "lifecycle", event: "handback", reason });
-    const result = this.readResult(id);
-    this.deps.spine.setCodingSessionStatus(id, "paused", result);
-    this.emitCoding(id, { type: "coding.session.paused", codingSessionId: id, result });
+    // Tear down the PTY; the result is captured + `paused` emitted in onExit, once
+    // the process has exited and Claude Code has flushed the final assistant message
+    // to its transcript (a fast sentinel/stop-hook fires a beat before that flush).
     this.handingBack.add(id);
     l.handle.kill();
   }
@@ -385,9 +390,12 @@ export class CodingSessionManager {
     if (!path) return undefined;
     const entries = parseClaudeTranscript(path);
     for (let i = entries.length - 1; i >= 0; i--) {
-      if (entries[i]!.text && entries[i]!.role === "assistant") return entries[i]!.text;
+      if (entries[i]!.role === "assistant" && entries[i]!.text) {
+        const t = stripHandback(entries[i]!.text!);
+        if (t) return t; // skip a message that was only the marker
+      }
     }
-    return renderTranscript(entries) || undefined;
+    return stripHandback(renderTranscript(entries)) || undefined;
   }
 
   private emitCoding(id: string, body: { type: string } & Record<string, unknown>): void {
