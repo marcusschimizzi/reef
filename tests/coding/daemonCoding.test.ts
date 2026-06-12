@@ -151,18 +151,34 @@ describe("Daemon coding-session control", () => {
     const cs = daemon.spine.findCodingSessionBySubwork(run!.id, "tool_1")!;
     expect(cs.status).toBe("running");
 
-    // The suspended run has no live aborter; cancel must still reach the session.
+    // The suspended run has no live aborter; cancel must still reach the session
+    // AND finalize the stranded run synchronously (it emits run.completed with
+    // stopReason "cancelled", mirroring the loop's abort-finalize convention).
+    const settled = whenRunSettles(daemon, run!.id);
     daemon.cancel("s1");
     expect(driver.handle.killed).toBe(true);
+    await settled;
 
-    // The kill exits the PTY non-zero → manager records `cancelled`. That exit
-    // also enqueues a resume job for the spawning run; await it draining (it
-    // re-parks, since a cancelled session yields no collectable result) so the
-    // daemon isn't torn down mid-resume.
-    const settled = whenRunSettles(daemon, run!.id);
+    const cancelledRun = daemon.spine.getRun(run!.id)!;
+    expect(cancelledRun.status).toBe("completed");
+    expect(cancelledRun.stopReason).toBe("cancelled");
+
+    // The kill exits the PTY non-zero → manager records `cancelled` and emits
+    // coding.session.completed, which enqueues a resume job for the spawning run.
+    // Because the run is already terminal, resumeRun is a no-op: the run must NOT
+    // re-park at awaiting_subwork. Await the resume job draining (via the same
+    // serial inbox, behind a marker submit) before tearing the daemon down.
     driver.handle.die(143);
     expect(daemon.spine.getCodingSession(cs.id)!.status).toBe("cancelled");
-    await settled;
+    // The marker run errors out (router is out of turns) — we only need it to
+    // drain behind the resume job; its rejection is expected and swallowed.
+    await daemon
+      .submit({ sessionKey: "marker", agentId: "reef", message: "drain" })
+      .catch(() => undefined);
+
+    const afterKill = daemon.spine.getRun(run!.id)!;
+    expect(afterKill.status).toBe("completed");
+    expect(afterKill.stopReason).toBe("cancelled");
     daemon.close();
   });
 });

@@ -328,15 +328,33 @@ export class Daemon {
   cancel(sessionKey: string): boolean {
     let killedCoding = false;
     for (const cs of this.spine.listCodingSessions()) {
+      const spawningRun = cs.spawningRunId ? this.spine.getRun(cs.spawningRunId) : undefined;
       if (
         cs.spawningRunId &&
-        this.spine.getRun(cs.spawningRunId)?.sessionKey === sessionKey &&
+        spawningRun?.sessionKey === sessionKey &&
         cs.status !== "completed" &&
         cs.status !== "failed" &&
         cs.status !== "cancelled"
       ) {
         this.coding.cancel(cs.id);
         killedCoding = true;
+        // A run suspended awaiting_subwork has no live aborter, so the abort path
+        // below never finalizes it. Mark it terminal here using the same
+        // convention runAgentLoop uses for an aborted run (status "completed",
+        // stopReason "cancelled"), so the post-kill coding.session.completed
+        // resume hits resumeRun's no-suspended guard instead of re-parking it.
+        if (spawningRun.status === "suspended") {
+          this.spine.setRunStatus(cs.spawningRunId, "completed", {
+            stopReason: "cancelled",
+            endedAt: nowIso(),
+          });
+          this.sink.emit({
+            type: "run.completed",
+            stopReason: "cancelled",
+            sessionKey,
+            runId: cs.spawningRunId,
+          });
+        }
       }
     }
     const aborter = this.aborters.get(sessionKey);
@@ -646,7 +664,11 @@ export class Daemon {
 
   private async resumeRun(runId: string): Promise<void> {
     const run = this.spine.getRun(runId);
-    if (!run) return;
+    // Only a still-suspended run resumes. A resume job for a run that already
+    // reached a terminal state (e.g. cancel marked it completed before the
+    // post-kill coding.session.completed enqueued this resume) is a no-op,
+    // rather than re-driving the subwork preamble and re-parking it forever.
+    if (!run || run.status !== "suspended") return;
     this.spine.setRunStatus(runId, "running");
     await this.runLoop({ ...run, status: "running" }, { resumeApproval: true });
   }
