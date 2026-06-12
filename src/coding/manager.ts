@@ -50,6 +50,7 @@ export class CodingSessionManager {
     this.deps.spine.createCodingSession({
       id,
       spawningRunId: opts.spawningRunId ?? null,
+      spawningToolUseId: null,
       agentKind: opts.agentKind,
       externalSessionId,
       directory: opts.directory,

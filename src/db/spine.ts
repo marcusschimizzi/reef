@@ -36,6 +36,7 @@ export interface MessageEntry extends Message {
 export interface CodingSessionRecord {
   id: string;
   spawningRunId: string | null;
+  spawningToolUseId: string | null;
   agentKind: string;
   externalSessionId: string;
   directory: string;
@@ -765,8 +766,8 @@ export class Spine {
     this.db
       .prepare(
         `INSERT INTO coding_sessions
-           (id, spawning_run_id, agent_kind, external_session_id, directory, status, task, trace_path, created_at)
-         VALUES (@id, @spawningRunId, @agentKind, @externalSessionId, @directory, @status, @task, @tracePath, @createdAt)`,
+           (id, spawning_run_id, spawning_tool_use_id, agent_kind, external_session_id, directory, status, task, trace_path, created_at)
+         VALUES (@id, @spawningRunId, @spawningToolUseId, @agentKind, @externalSessionId, @directory, @status, @task, @tracePath, @createdAt)`,
       )
       .run({ ...rec, createdAt: nowIso() });
   }
@@ -775,6 +776,13 @@ export class Spine {
     const row = this.db.prepare(`SELECT * FROM coding_sessions WHERE id = ?`).get(id) as
       | Record<string, unknown>
       | undefined;
+    return row ? rowToCodingSession(row) : undefined;
+  }
+
+  findCodingSessionBySubwork(runId: string, toolUseId: string): CodingSessionRecord | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM coding_sessions WHERE spawning_run_id = ? AND spawning_tool_use_id = ?`)
+      .get(runId, toolUseId) as Record<string, unknown> | undefined;
     return row ? rowToCodingSession(row) : undefined;
   }
 
@@ -910,6 +918,7 @@ function rowToCodingSession(row: Record<string, unknown>): CodingSessionRecord {
   return {
     id: row.id as string,
     spawningRunId: (row.spawning_run_id as string | null) ?? null,
+    spawningToolUseId: (row.spawning_tool_use_id as string | null) ?? null,
     agentKind: row.agent_kind as string,
     externalSessionId: row.external_session_id as string,
     directory: row.directory as string,

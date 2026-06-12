@@ -154,6 +154,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE TABLE IF NOT EXISTS coding_sessions (
   id           TEXT PRIMARY KEY,
   spawning_run_id     TEXT,
+  spawning_tool_use_id TEXT,
   agent_kind   TEXT NOT NULL,
   external_session_id TEXT NOT NULL,
   directory    TEXT NOT NULL,
@@ -184,6 +185,7 @@ function migrate(db: Database): void {
   addColumnIfMissing(db, "triggers", "created_by", "TEXT NOT NULL DEFAULT 'operator'");
   addColumnIfMissing(db, "approvals", "expires_at", "TEXT");
   addColumnIfMissing(db, "sessions", "model", "TEXT");
+  addColumnIfMissing(db, "coding_sessions", "spawning_tool_use_id", "TEXT");
 }
 
 function addColumnIfMissing(
