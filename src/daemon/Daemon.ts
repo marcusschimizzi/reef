@@ -1,6 +1,9 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { newRunId, newTriggerId } from "../core/ids.js";
+import { CodingSessionManager } from "../coding/manager.js";
+import { PtyClaudeDriver } from "../coding/ptyClaude.js";
+import type { CodingAgentDriver } from "../coding/driver.js";
 import { nowIso } from "../core/time.js";
 import type {
   Action,
@@ -68,6 +71,10 @@ export interface DaemonOptions {
   proactiveApprovalTimeoutSeconds?: number;
   /** Injectable fs-watch factory for file-watch triggers (Phase 4d); defaults to node:fs watch. */
   watchFactory?: WatchFactory;
+  /** Coding-agent transport; defaults to the node-pty Claude driver. Injectable for tests. */
+  codingDriver?: CodingAgentDriver;
+  /** Directory for coding-session flight-recorder traces; defaults to <workspaceDir>/../coding-sessions. */
+  codingTraceDir?: string;
 }
 
 /** Default self-maintenance instruction for a heartbeat trigger (Phase 4b). */
@@ -128,6 +135,7 @@ export class Daemon {
   private readonly runMeta = new Map<string, { proactive: boolean; agentId: string }>();
   /** Abort handles for in-flight runs, keyed by session — powers cancellation. */
   private readonly aborters = new Map<string, AbortController>();
+  private readonly coding: CodingSessionManager;
 
   constructor(opts: DaemonOptions) {
     this.spine = new Spine(opts.dbPath);
@@ -162,6 +170,12 @@ export class Daemon {
       (triggerId, event) => void this.inbox.enqueue({ kind: "trigger", triggerId, event }),
       opts.watchFactory,
     );
+    this.coding = new CodingSessionManager({
+      spine: this.spine,
+      emit: this.sink.emit,
+      driver: opts.codingDriver ?? new PtyClaudeDriver(),
+      traceDir: opts.codingTraceDir ?? join(opts.workspaceDir, "..", "coding-sessions"),
+    });
     // Watch our own event stream to route proactive approval requests out to
     // surfaces (and arm their auto-deny deadline). Inert unless a proactive run
     // actually suspends for approval — which only happens when routing is on.
@@ -402,6 +416,17 @@ export class Daemon {
     this.spine.setSessionModel(sessionKey, agentId, model);
     this.sink.emit({ type: "session.model.changed", sessionKey, runId: "", model });
     return null;
+  }
+
+  // ── coding-agent control (operator-initiated in Step 1) ─────────────────────
+  startCodingSession(opts: { agentKind: string; directory: string; task: string }): string {
+    return this.coding.start(opts);
+  }
+  sendToCodingSession(id: string, data: string): void {
+    this.coding.send(id, data);
+  }
+  cancelCodingSession(id: string): void {
+    this.coding.cancel(id);
   }
 
   /** Recent runs, optionally filtered by status (most recent first). */

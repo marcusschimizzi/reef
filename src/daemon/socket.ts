@@ -17,7 +17,10 @@ export type ControlRequest =
   // sessions view (Phase 4c TUI): snapshot the session list, or replay one
   // session's event history to rebuild its transcript on open.
   | { kind: "list_sessions" }
-  | { kind: "history"; sessionKey: string };
+  | { kind: "history"; sessionKey: string }
+  | { kind: "coding_start"; directory: string; task: string; agentKind?: string }
+  | { kind: "coding_send"; codingSessionId: string; data: string }
+  | { kind: "coding_cancel"; codingSessionId: string };
 
 export function startSocketServer(
   daemon: Daemon,
@@ -98,6 +101,17 @@ function handleLine(
       sock.write(
         `${JSON.stringify({ kind: "history", sessionKey: req.sessionKey, events: daemon.getHistory(req.sessionKey) })}\n`,
       );
+      break;
+    case "coding_start": {
+      const id = daemon.startCodingSession({ agentKind: req.agentKind ?? "claude-code", directory: req.directory, task: req.task });
+      sock.write(`${JSON.stringify({ kind: "coding_started", codingSessionId: id })}\n`);
+      break;
+    }
+    case "coding_send":
+      daemon.sendToCodingSession(req.codingSessionId, req.data);
+      break;
+    case "coding_cancel":
+      daemon.cancelCodingSession(req.codingSessionId);
       break;
   }
 }
