@@ -418,3 +418,61 @@ work, like gate) — it throws if reached, signalling a wiring bug.
 3. `start_coding_session` tool + daemon wiring (`startSubwork`/`collectSubwork`,
    completion→resume enqueue, `resumeRun` mode select). (Concern C.)
 4. Daemon composition test + cancellation propagation (cancel manager run → kill PTY).
+
+**Step 3 STATUS: BUILT + MERGED TO MAIN (2026-06-12, 282 tests).** All of A+B+C plus the
+review-fix rounds. Plan: `docs/superpowers/plans/2026-06-12-coding-agent-control-step3.md`.
+Also added: **model selection** (`--model`, `REEF_CODING_MODEL` env default — run testing on
+haiku). **Live-verified** against real Claude Code v2.1.175 on Haiku 4.5: trust prompt detected
+with clean labels, ApprovalPolicy auto-answered (`policy:allow` → injected `1`), result captured
+from the transcript. The live run surfaced the handback gap below.
+
+---
+
+## Step 3.1 — handback & resumable session lifecycle (design 2026-06-12)
+
+**Why:** Live verification showed interactive `claude` does **not** exit after finishing a task —
+it completes the work and waits at its prompt. So a coding session never reaches a natural
+`completed`; the smoke ran to its 120 s safety cap and was force-cancelled. For the agent flow
+this is load-bearing: with no session end, `collectSubwork` never fires and the manager run stays
+suspended `awaiting_subwork` forever.
+
+**Reframe (user, 2026-06-12):** a coding session is a **durable, resumable entity** (minted UUID +
+`claude --resume <uuid>`). "This increment is done, hand control back" is NOT "permanently done" —
+only the user deems a session finished-forever. So completion-of-an-increment is a **handback**
+that *parks* the session resumably, not a teardown of its identity.
+
+### The handback signal (hybrid: sentinel primary, idle fallback)
+- **Sentinel** via the existing `appendSystemPrompt` seam: the manager always injects a handback
+  instruction telling the agent to print a unique marker (`<<REEF_HANDBACK>>`) on its own line
+  when it has finished the requested task and is awaiting further instructions. Detected in the
+  manager by scanning rendered `output` text for the marker → fast handback.
+- **Idle fallback**: the manager arms a per-session idle timer (`idleMs`, dep/`REEF_CODING_IDLE_MS`
+  default ~8 s), reset on each `output`. Fired while `running` → handback. **Disarmed during
+  `awaiting_decision`** (a gated prompt waiting on a human is idle but NOT done) and re-armed when
+  the prompt is answered. Safety net for a non-compliant agent.
+
+### On handback (manager)
+Latch (once per session) → `readResult` (transcript final assistant text) → set status **`paused`**
++ result → emit **`coding.session.paused {codingSessionId, result?}`** → tear down the PTY as a
+**deliberate handback** (a `handingBack` set, like `cancelling`, so `onExit` records neither
+`failed` nor a second completion event — it just clears the timer + trace + live entry). The
+`external_session_id` is retained → revivable via `--resume`.
+
+### Lifecycle / status model
+`running` → (`awaiting_decision` ⇄ `running`) → **`paused`** (increment done, PTY torn down,
+**resumable**). `completed`/`cancelled` stay reserved for **user-ended** sessions. `paused` is a
+new free-text value of `coding_sessions.status` (no schema change). Reviving a paused session is a
+future `send_feedback(sessionId, text)` that spawns `claude --resume <uuid>` with the new prompt.
+
+### Daemon wiring
+- `onSinkEvent`: `coding.session.paused` (like `completed`/`failed`) for a session with a
+  `spawning_run_id` → enqueue `{kind:"resume", runId}`.
+- `collectSubwork`: treat `paused` as a completable status (return its `result`; `failed` only for
+  status `failed`). So the manager run resumes with the increment result on handback.
+
+### Testing (no Claude spend)
+`containsHandback(text)` unit; manager: marker in `output` → `coding.session.paused` + status
+`paused` + PTY killed + result captured + NO `completed` event; idle fallback via fake timers;
+idle disarmed during `awaiting_decision`; `appendSystemPrompt` carries the handback instruction
+(via `driver.lastOpts`); daemon: `coding.session.paused` enqueues a resume + `collectSubwork`
+returns the result for `paused`. Smoke updated to report `paused` (should now end cleanly, no cap).
