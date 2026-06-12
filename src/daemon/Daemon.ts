@@ -43,6 +43,7 @@ import { shellTools } from "../tools/shell.js";
 import { memoryTools } from "../tools/memory.js";
 import { scheduleTools } from "../tools/schedule.js";
 import { introspectTools } from "../tools/introspect.js";
+import { codingTools, startCodingSession } from "../tools/coding.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { EventSink } from "./sink.js";
 import { Inbox } from "./inbox.js";
@@ -160,6 +161,7 @@ export class Daemon {
       ...memoryTools,
       ...scheduleTools,
       ...introspectTools,
+      ...codingTools,
     ]) {
       this.tools.register(tool);
     }
@@ -195,6 +197,12 @@ export class Daemon {
     } else if (event.type === "approval.requested") {
       const meta = this.runMeta.get(event.runId);
       if (meta?.proactive) this.routeApproval(event, meta.agentId);
+    } else if (
+      event.type === "coding.session.completed" ||
+      event.type === "coding.session.failed"
+    ) {
+      const cs = this.spine.getCodingSession(event.codingSessionId);
+      if (cs?.spawningRunId) void this.inbox.enqueue({ kind: "resume", runId: cs.spawningRunId });
     }
   }
 
@@ -262,6 +270,28 @@ export class Daemon {
    * the same serial inbox) to execute the decided tools and continue.
    */
   resolveApproval(approvalId: string, decision: string): boolean {
+    // Coding-session approvals resolve into a keystroke injection, not a run resume.
+    const coding = this.spine.getCodingApproval(approvalId);
+    if (coding) {
+      if (coding.status !== "pending") return false;
+      const status: ApprovalStatus = decision === "deny" ? "denied" : "allowed";
+      this.spine.resolveCodingApproval(approvalId, status, decision);
+      this.sink.emit({
+        type: "approval.resolved",
+        sessionKey: `coding:${coding.codingSessionId}`,
+        runId: "",
+        approvalId,
+        decision:
+          decision === "allow-always"
+            ? "allow-always"
+            : decision === "deny"
+              ? "deny"
+              : "allow-once",
+      });
+      this.coding.resolveCodingApproval(approvalId, decision);
+      return true;
+    }
+
     const approval = this.spine.getApproval(approvalId);
     if (!approval || approval.status !== "pending") return false;
     const status: ApprovalStatus = decision === "deny" ? "denied" : "allowed";
@@ -640,6 +670,26 @@ export class Daemon {
           },
           emit: this.sink.emit,
           maxSteps: this.maxSteps,
+          startSubwork: async (r, call, src) => {
+            // Idempotent: if this (run, toolUse) already spawned a session, reuse it
+            // (defends against a duplicate resume re-starting an in-flight session).
+            const existing = this.spine.findCodingSessionBySubwork(r.id, call.id);
+            if (existing) return existing.id;
+            const input = startCodingSession.inputSchema.parse(call.input);
+            return this.coding.start({
+              agentKind: input.agentKind ?? "claude-code",
+              directory: input.directory,
+              task: input.task,
+              spawningRunId: r.id,
+              spawningToolUseId: call.id,
+              source: src,
+            });
+          },
+          collectSubwork: (runId, toolUseId) => {
+            const cs = this.spine.findCodingSessionBySubwork(runId, toolUseId);
+            if (!cs || (cs.status !== "completed" && cs.status !== "failed")) return undefined;
+            return { result: cs.result ?? `coding session ${cs.id} ${cs.status}` };
+          },
         },
         options,
       );
