@@ -28,3 +28,28 @@ describe("coding_sessions subwork link", () => {
     expect(s.findCodingSessionBySubwork("run_1", "nope")).toBeUndefined();
   });
 });
+
+describe("coding_approvals", () => {
+  it("creates pending, reads back, and resolves", () => {
+    const s = spine();
+    const cs = makeSession(s);
+    s.createCodingApproval({
+      id: "apr_1", codingSessionId: cs, promptText: "Do you want to edit a.ts?",
+      options: [{ index: 1, label: "Yes" }, { index: 2, label: "No" }],
+      toolName: "claude-code:Edit", input: { path: "a.ts" },
+    });
+    const a = s.getCodingApproval("apr_1")!;
+    expect(a).toMatchObject({ codingSessionId: cs, status: "pending", toolName: "claude-code:Edit" });
+    expect(a.options).toEqual([{ index: 1, label: "Yes" }, { index: 2, label: "No" }]);
+
+    s.resolveCodingApproval("apr_1", "allowed", "allow-once");
+    const r = s.getCodingApproval("apr_1")!;
+    expect(r.status).toBe("allowed");
+    expect(r.decision).toBe("allow-once");
+    expect(r.decidedAt).toBeTruthy();
+  });
+
+  it("getCodingApproval returns undefined for an unknown id", () => {
+    expect(spine().getCodingApproval("nope")).toBeUndefined();
+  });
+});

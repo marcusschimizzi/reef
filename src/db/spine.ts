@@ -48,6 +48,19 @@ export interface CodingSessionRecord {
   endedAt?: string;
 }
 
+export interface CodingApprovalRecord {
+  id: string;
+  codingSessionId: string;
+  promptText: string;
+  options: { index: number; label: string }[];
+  toolName: string;
+  input: unknown;
+  status: "pending" | "allowed" | "denied";
+  decision?: string;
+  createdAt: string;
+  decidedAt?: string;
+}
+
 // ── row shapes (as stored) ──────────────────────────────────────────────────
 interface AgentRow {
   id: string;
@@ -803,6 +816,47 @@ export class Spine {
       .all() as Array<Record<string, unknown>>;
     return rows.map(rowToCodingSession);
   }
+
+  // ── coding approvals ──────────────────────────────────────────────────────
+  createCodingApproval(rec: {
+    id: string;
+    codingSessionId: string;
+    promptText: string;
+    options: { index: number; label: string }[];
+    toolName: string;
+    input: unknown;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO coding_approvals
+           (id, coding_session_id, prompt_text, options, tool_name, input, status, created_at)
+         VALUES (@id, @codingSessionId, @promptText, @options, @toolName, @input, 'pending', @createdAt)`,
+      )
+      .run({
+        id: rec.id,
+        codingSessionId: rec.codingSessionId,
+        promptText: rec.promptText,
+        options: JSON.stringify(rec.options),
+        toolName: rec.toolName,
+        input: JSON.stringify(rec.input ?? null),
+        createdAt: nowIso(),
+      });
+  }
+
+  getCodingApproval(id: string): CodingApprovalRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM coding_approvals WHERE id = ?`).get(id) as
+      | Record<string, unknown>
+      | undefined;
+    return row ? rowToCodingApproval(row) : undefined;
+  }
+
+  resolveCodingApproval(id: string, status: "allowed" | "denied", decision: string): void {
+    this.db
+      .prepare(
+        `UPDATE coding_approvals SET status = ?, decision = ?, decided_at = ? WHERE id = ?`,
+      )
+      .run(status, decision, nowIso(), id);
+  }
 }
 
 /** Map a session's latest run to its list-view status. */
@@ -928,5 +982,20 @@ function rowToCodingSession(row: Record<string, unknown>): CodingSessionRecord {
     tracePath: row.trace_path as string,
     createdAt: row.created_at as string,
     endedAt: (row.ended_at as string | null) ?? undefined,
+  };
+}
+
+function rowToCodingApproval(row: Record<string, unknown>): CodingApprovalRecord {
+  return {
+    id: row.id as string,
+    codingSessionId: row.coding_session_id as string,
+    promptText: row.prompt_text as string,
+    options: JSON.parse(row.options as string) as { index: number; label: string }[],
+    toolName: row.tool_name as string,
+    input: JSON.parse(row.input as string),
+    status: row.status as "pending" | "allowed" | "denied",
+    decision: (row.decision as string | null) ?? undefined,
+    createdAt: row.created_at as string,
+    decidedAt: (row.decided_at as string | null) ?? undefined,
   };
 }
