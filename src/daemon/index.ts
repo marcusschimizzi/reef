@@ -49,6 +49,12 @@ const DEFAULT_AGENT: AgentRecord = {
     "and drop one with cancel_schedule. " +
     "You can inspect your own operational state with list_runs, list_sessions, and " +
     "list_triggers. " +
+    "You can delegate coding work to an external Claude Code agent: start_coding_session " +
+    "spawns one in a target directory with a task and suspends you until it hands back a " +
+    "result; send_feedback gives a paused coding session a follow-up instruction (pass the " +
+    "session id from a prior result). The coding agent runs under your governance — its " +
+    "prompts are approved through your policy and it reports back a durable result. Delegate " +
+    "substantial coding tasks to it; for small edits you can also use the file tools yourself. " +
     "Use the available tools when they help accomplish the task.",
   // Resolved from env REEF_MODEL > config.defaultModel > built-in default, as
   // `provider/model` (e.g. ollama/llama3.1, openrouter/…); bare id = Anthropic.
@@ -70,6 +76,8 @@ const DEFAULT_AGENT: AgentRecord = {
     "list_sessions",
     "list_triggers",
     "current_model",
+    "start_coding_session",
+    "send_feedback",
   ],
 };
 
