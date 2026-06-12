@@ -318,3 +318,103 @@ internal delegation (sub-project C) has to solve. This is why F is a good first 
 Replace the manager's `prompt-pending` hook with the policy flow above (using a fake driver +
 the committed fixtures to test it), THEN add `awaiting_subwork` + the agent tool. Dev aids:
 `scripts/{capture-fixture,trace-inspect,trace-raw,coding-session-smoke}.ts`.
+
+---
+
+## Step 3 — detailed design (pinned 2026-06-12, full scope A+B+C this session)
+
+Two reconnaissance findings pinned the mechanics down and forked the design from a naive
+"mirror the approval flow" reading:
+
+- **The `approvals` table cannot host coding-session prompts.** `approvals.run_id` is `NOT NULL`
+  with an FK to `runs`, and `Daemon.resolveApproval` does `pendingApprovalCount(runId) → enqueue
+  resume`. A coding session's *internal* prompt (Claude Code wants to edit a file) must NOT
+  resume the manager run — the manager run only resumes when the **whole session** completes. And
+  operator-initiated sessions have no run. So coding approvals are a different kind of record.
+- **Two suspends compose in sequence.** `start_coding_session` is gated → manager run suspends
+  `awaiting_approval` (existing `b7786ed` machinery) → human approves → resume → tool wants
+  subwork → suspends `awaiting_subwork` (new) → session runs → completes → resume with result.
+  The loop checks gate **before** subwork, so they layer — but the subwork-suspend check must
+  live in **both** the normal turn path and `finishSuspendedTurn` (the post-approval resume).
+
+### A — policy flow in `CodingSessionManager` (on `prompt-pending`)
+1. Read Claude Code's transcript JSONL (`findClaudeTranscript(externalSessionId, {cwd})` →
+   `latestToolUse`) for the reliable action; fall back to scraped `promptAction(text)`.
+2. Build a `PolicyContext`: `toolName = "claude-code:" + (latestToolUse?.name ?? classifyPrompt)`,
+   `input = latestToolUse?.input ?? promptAction`, `needsApproval = true`,
+   `source` = the spawning run's source (operator-initiated → `{kind:"message"}`),
+   `sessionKey = coding:<id>`, `agentId` = the coding agent's id (or the spawning agent's).
+3. `policy.decide(ctx)`:
+   - **allow** → `answerFor(options,"allow-once")` → inject `${n}\r`; audit `actions` row.
+   - **deny** → `answerFor(options,"deny")` → inject; audit (outcome `denied`).
+   - **gate** → insert a `coding_approvals` row (status `pending`), `emit("approval.requested")`
+     so the existing surfaces fire; session waits at its PTY. On human resolve →
+     `answerFor(options, decision)` → inject; audit.
+
+### Gate storage — `coding_approvals` table (decision: durable, not in-memory)
+A dedicated durable table, parallel to `approvals` but never colliding with the run-resume path:
+
+| col | meaning |
+|---|---|
+| `id` | approval id (PK; reuse `newApprovalId()`) |
+| `coding_session_id` | the `cs_…` session it belongs to |
+| `prompt_text` | the rendered prompt |
+| `options` | JSON `[{index,label}]` (so resolve can `answerFor`) |
+| `tool_name` | `claude-code:<latestToolUse>` (for the surface/audit) |
+| `input` | JSON — `latestToolUse.input` or `promptAction` |
+| `status` | `pending`/`allowed`/`denied` |
+| `decision` | the resolved decision string (nullable) |
+| `created_at`,`decided_at`,`expires_at` | timestamps (expiry reuses the proactive auto-deny) |
+
+`Daemon.resolveApproval(id, decision)` checks `coding_approvals` **first**: if the id is a coding
+approval, resolve it there and route to `manager.resolveCodingApproval(id, decision)` (inject the
+mapped digit + audit) — do **not** touch the run-resume path. Rationale (user, 2026-06-12): we
+already mint the session UUID, so `--resume` recovery is cheap to add later and the durable row
+becomes actionable; doing it right now avoids debt. Until recovery lands, a restart leaves the row
+`pending` against a dead PTY — acceptable, and the natural seam for the future recovery work.
+
+### B — `awaiting_subwork` suspend/resume (new loop machinery, mirrors `b7786ed`)
+- `Tool` gains `suspendsForSubwork?: boolean` (parallel to `needsApproval`).
+- `LoopDeps` gains two hooks the daemon wires to the manager + spine:
+  `startSubwork(run, call) → codingSessionId` (start the session linked to `run.id` + `call.id`)
+  and `collectSubwork(runId, toolUseId) → { result } | undefined` (read the completed session's
+  result). Omitting them preserves today's behavior (a subwork tool with no hook just runs).
+- Shared check in **both** the main loop iteration and `finishSuspendedTurn`: an un-started
+  subwork tool → `startSubwork`, persist the step pending (model turn saved), `setRunStatus(
+  suspended, {stopReason:"awaiting_subwork"})`, emit `run.suspended`, return `"awaiting_subwork"`.
+- `Daemon.resumeRun` picks the resume mode from the run's stored `stopReason`
+  (`awaiting_subwork` → subwork resume; else the existing approval resume).
+- Completion→resume: the daemon already subscribes to the sink; on `coding.session.completed`
+  for a session with a non-null `spawning_run_id`, enqueue `{kind:"resume", runId}`. The resume
+  runs `collectSubwork` → the transcript's final assistant text becomes the `tool_result`; the
+  turn commits and the loop continues.
+- New column `coding_sessions.spawning_tool_use_id` so `collectSubwork` locates the session by
+  `(spawning_run_id, spawning_tool_use_id)`. `coding_sessions.result` (already in the schema) is
+  set on completion from `renderTranscript`'s final assistant text.
+
+### C — the `start_coding_session` tool
+`{ name:"start_coding_session", description, inputSchema:{directory, task, agentKind?},
+needsApproval:true, suspendsForSubwork:true }`. Registered in the daemon's tool list; an agent
+must list it in its allowlist to use it. `needsApproval:true` means a proactive/trigger run
+**denies** it (no approver — safe) and an interactive run **gates** it (human approves spawning
+Claude Code). Its `run()` is never executed for effect (the loop's `startSubwork` hook does the
+work, like gate) — it throws if reached, signalling a wiring bug.
+
+### Testing (no Claude spend)
+- Replay/fixtures unchanged. New: drive A end-to-end through `CodingSessionManager` with the
+  `FakeDriver` + committed fixtures (`trust-prompt`/`edit-approval`/`claude-session`) and a fake
+  `ApprovalPolicy` returning each of allow/gate/deny; assert the injected digit, the audit row,
+  and (gate) the `coding_approvals` row + `resolveCodingApproval` injection.
+- B+C: unit-test the loop's subwork suspend/resume with a fake `startSubwork`/`collectSubwork`
+  and a stub `start_coding_session` tool; assert `awaiting_subwork` on first pass and the
+  `tool_result` from `collectSubwork` on resume. Daemon-level test: the two-suspend composition
+  (gate-approval then subwork) and the `coding.session.completed → resume` wiring.
+
+### Build order (TDD, each step green before the next)
+1. `coding_approvals` table + spine CRUD; manager A-flow (allow/deny first, then gate +
+   `resolveCodingApproval`); `Daemon.resolveApproval` fork. (Concern A.)
+2. `Tool.suspendsForSubwork`; loop subwork suspend/resume + `LoopDeps` hooks;
+   `coding_sessions.spawning_tool_use_id` + result-on-completion. (Concern B.)
+3. `start_coding_session` tool + daemon wiring (`startSubwork`/`collectSubwork`,
+   completion→resume enqueue, `resumeRun` mode select). (Concern C.)
+4. Daemon composition test + cancellation propagation (cancel manager run → kill PTY).
