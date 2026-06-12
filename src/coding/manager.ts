@@ -99,13 +99,68 @@ export class CodingSessionManager {
       tracePath,
     });
 
-    const trace = new TraceWriter(tracePath);
-    trace.write({ type: "lifecycle", event: "spawn" });
+    this.launch({
+      id,
+      externalSessionId,
+      directory: opts.directory,
+      task: opts.task,
+      model,
+      source: opts.source ?? { kind: "message" },
+      resume: false,
+      tracePath,
+    });
+
+    // Emitted only for a fresh start (resume revives an already-started session).
+    this.emitCoding(id, { type: "coding.session.started", codingSessionId: id, agentKind: opts.agentKind, directory: opts.directory });
+
+    return id;
+  }
+
+  /** Revive a paused coding session with a follow-up increment (claude --resume).
+   *  Re-links the session to the reviving run+tool so the new result routes back.
+   *  Throws if the session isn't a resumable `paused` one (→ a graceful error
+   *  tool_result via the loop's subwork-failure path). */
+  resume(sessionId: string, text: string, opts: { spawningRunId?: string | null; spawningToolUseId?: string | null } = {}): void {
+    const cs = this.deps.spine.getCodingSession(sessionId);
+    if (!cs || cs.status !== "paused") {
+      throw new Error(`coding session ${sessionId} is not resumable (status: ${cs?.status ?? "not found"})`);
+    }
+    this.deps.spine.relinkCodingSessionSubwork(sessionId, opts.spawningRunId ?? null, opts.spawningToolUseId ?? null);
+    this.deps.spine.setCodingSessionStatus(sessionId, "running");
+    this.launch({
+      id: cs.id,
+      externalSessionId: cs.externalSessionId,
+      directory: cs.directory,
+      task: text,
+      model: cs.model,
+      source: { kind: "message" },
+      resume: true,
+      tracePath: cs.tracePath,
+    });
+  }
+
+  /** Wire up the live session: trace, processor, driver handle, Stop-hook watcher,
+   *  and the data/exit handlers. Shared by start() (new) and resume() (revive).
+   *  The TraceWriter appends, so a revive continues the prior increment's trace. */
+  private launch(opts: {
+    id: string;
+    externalSessionId: string;
+    directory: string;
+    task: string;
+    model?: string;
+    source: RunSource;
+    resume: boolean;
+    tracePath: string;
+  }): void {
+    const { id } = opts;
+    const trace = new TraceWriter(opts.tracePath);
+    trace.write({ type: "lifecycle", event: opts.resume ? "resume" : "spawn" });
     const processor = new CodingStreamProcessor();
 
     // Reef-owned settings + sentinel files live under traceDir (never the user's
     // repo or ~/.claude). The settings carry a Stop hook that touches the sentinel
     // when the agent finishes a turn; reef watches it → deterministic handback.
+    // Re-passed on resume so the hook + sentinel work on the revived turn too.
     const handbackFile = join(this.deps.traceDir, `${id}.handback`);
     const settingsFile = join(this.deps.traceDir, `${id}.settings.json`);
     mkdirSync(this.deps.traceDir, { recursive: true });
@@ -113,21 +168,20 @@ export class CodingSessionManager {
 
     const handle = this.deps.driver.start({
       directory: opts.directory,
-      sessionId: externalSessionId,
+      sessionId: opts.externalSessionId,
       task: opts.task,
+      resume: opts.resume,
       appendSystemPrompt: [HANDBACK_INSTRUCTION, this.deps.appendSystemPrompt].filter(Boolean).join("\n\n"),
-      model,
+      model: opts.model,
       settingsPath: settingsFile,
     });
-    this.live.set(id, { handle, processor, trace, source: opts.source ?? { kind: "message" }, handedBack: false });
+    this.live.set(id, { handle, processor, trace, source: opts.source, handedBack: false });
 
     // Arm the Stop-hook watcher: the sentinel appearing → handback("stop-hook").
     const watch = this.deps.watchHandbackFile ?? defaultWatchHandbackFile;
     const dispose = watch(handbackFile, () => this.handback(id, "stop-hook"));
     const l0 = this.live.get(id);
     if (l0) l0.disposeWatch = dispose;
-
-    this.emitCoding(id, { type: "coding.session.started", codingSessionId: id, agentKind: opts.agentKind, directory: opts.directory });
 
     handle.onData((chunk) => {
       trace.write({ type: "pty.raw", bytes: Buffer.from(chunk, "utf8").toString("base64") });
@@ -164,8 +218,6 @@ export class CodingSessionManager {
       trace.close();
       this.live.delete(id);
     });
-
-    return id;
   }
 
   /** Inject raw keystrokes (operator answering a prompt by hand in Step 1). */

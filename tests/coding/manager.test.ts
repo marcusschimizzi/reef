@@ -296,6 +296,56 @@ describe("CodingSessionManager", () => {
     expect(isDisposed()).toBe(true);
   });
 
+  it("resume() revives a paused session via --resume and re-links the subwork", () => {
+    const { spine, driver, mgr } = setup(new FakePolicy(() => ({ action: "allow" })));
+    const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "step 1" });
+    const ext = spine.getCodingSession(id)!.externalSessionId;
+    // Drive it to paused (sentinel marker → handback → kill → paused on exit).
+    driver.handle.feed(`done\n${HANDBACK_MARKER}\n`);
+    driver.handle.die(143);
+    expect(spine.getCodingSession(id)!.status).toBe("paused");
+
+    mgr.resume(id, "now do step 2", { spawningRunId: "run_2", spawningToolUseId: "tool_2" });
+    expect(spine.getCodingSession(id)!.status).toBe("running");
+    expect(spine.findCodingSessionBySubwork("run_2", "tool_2")!.id).toBe(id);
+    expect(driver.lastOpts?.resume).toBe(true);
+    expect(driver.lastOpts?.sessionId).toBe(ext);
+    expect(driver.lastOpts?.task).toBe("now do step 2");
+  });
+
+  it("resume() reuses the session's stored model", () => {
+    const { spine, driver, mgr } = setup(new FakePolicy(() => ({ action: "allow" })));
+    const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t", model: "haiku" });
+    driver.handle.feed(`done\n${HANDBACK_MARKER}\n`);
+    driver.handle.die(143);
+    expect(spine.getCodingSession(id)!.status).toBe("paused");
+    mgr.resume(id, "again");
+    expect(driver.lastOpts?.model).toBe("haiku");
+  });
+
+  it("resume() throws on a non-paused session and on an unknown id", () => {
+    const { mgr } = setup();
+    const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+    expect(() => mgr.resume(id, "x")).toThrow(/not resumable/);
+    expect(() => mgr.resume("cs_nope", "x")).toThrow(/not resumable/);
+  });
+
+  it("resume() re-arms the handback watcher so the next turn can pause again", () => {
+    const { spine, events, driver, mgr, getTrigger } = setup(new FakePolicy(() => ({ action: "allow" })));
+    const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+    getTrigger()!(); // first handback
+    driver.handle.die(143);
+    expect(spine.getCodingSession(id)!.status).toBe("paused");
+
+    mgr.resume(id, "step 2");
+    expect(spine.getCodingSession(id)!.status).toBe("running");
+    // launch re-armed the watcher → getTrigger() now returns the NEW onSignal.
+    getTrigger()!();
+    driver.handle.die(143);
+    expect(spine.getCodingSession(id)!.status).toBe("paused");
+    expect(events.filter((e) => e.type === "coding.session.paused").length).toBe(2);
+  });
+
   it("a gated prompt disarms the idle timer (no handback while a human decides)", () => {
     vi.useFakeTimers();
     try {
