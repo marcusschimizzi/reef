@@ -200,9 +200,12 @@ export class CodingSessionManager {
         this.clearWatch(id);
         const result = this.readResult(id);
         this.deps.spine.setCodingSessionStatus(id, "paused", result);
-        this.emitCoding(id, { type: "coding.session.paused", codingSessionId: id, result });
         trace.close();
+        // Tear this increment's live entry down BEFORE emitting — `emit` is
+        // synchronous, and a listener may revive the session (send_feedback) inline,
+        // which calls live.set(); deleting after the emit would clobber that entry.
         this.live.delete(id);
+        this.emitCoding(id, { type: "coding.session.paused", codingSessionId: id, result });
         return;
       }
       this.disarmIdle(id);
