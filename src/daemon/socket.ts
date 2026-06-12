@@ -20,7 +20,8 @@ export type ControlRequest =
   | { kind: "history"; sessionKey: string }
   | { kind: "coding_start"; directory: string; task: string; agentKind?: string; model?: string }
   | { kind: "coding_send"; codingSessionId: string; data: string }
-  | { kind: "coding_cancel"; codingSessionId: string };
+  | { kind: "coding_cancel"; codingSessionId: string }
+  | { kind: "coding_feedback"; codingSessionId: string; text: string };
 
 export function startSocketServer(
   daemon: Daemon,
@@ -112,6 +113,16 @@ function handleLine(
       break;
     case "coding_cancel":
       daemon.cancelCodingSession(req.codingSessionId);
+      break;
+    case "coding_feedback":
+      // resume() throws if the session isn't a resumable `paused` one — turn that
+      // into an error response rather than letting it escape the dispatch.
+      try {
+        daemon.feedbackToCodingSession(req.codingSessionId, req.text);
+        sock.write(`${JSON.stringify({ kind: "coding_feedback_sent", codingSessionId: req.codingSessionId })}\n`);
+      } catch (err) {
+        sock.write(`${JSON.stringify({ kind: "error", error: err instanceof Error ? err.message : String(err) })}\n`);
+      }
       break;
   }
 }

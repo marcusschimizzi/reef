@@ -195,6 +195,32 @@ describe("Daemon coding-session control", () => {
     d.close();
   });
 
+  it("coding_feedback: an operator revives a paused session via the daemon API", () => {
+    const dir = tmp();
+    const driver = new FakeDriver();
+    let trigger: (() => void) | undefined;
+    const d = new Daemon({
+      dbPath: join(dir, "reef.db"), workspaceDir: join(dir, "ws"), router: new NullRouter(), codingDriver: driver,
+      codingWatchHandbackFile: (_f, onSignal) => { trigger = onSignal; return () => { trigger = undefined; }; },
+    });
+    const id = d.startCodingSession({ agentKind: "claude-code", directory: dir, task: "go" });
+    expect(d.spine.getCodingSession(id)!.status).toBe("running");
+
+    // Hand back → paused (the Stop-hook signal, then the PTY exit finalizes paused).
+    trigger!();
+    driver.handle.die(143);
+    expect(d.spine.getCodingSession(id)!.status).toBe("paused");
+
+    // Operator feedback revives it → running again.
+    d.feedbackToCodingSession(id, "now do step 2");
+    expect(d.spine.getCodingSession(id)!.status).toBe("running");
+
+    // A non-resumable session (now running, or unknown) is an error.
+    expect(() => d.feedbackToCodingSession(id, "x")).toThrow(/not resumable/);
+    expect(() => d.feedbackToCodingSession("cs_nope", "x")).toThrow(/not resumable/);
+    d.close();
+  });
+
   it("end-to-end: an agent starts a coding session, suspends awaiting_subwork, and resumes to completion when it finishes", async () => {
     const { daemon, driver } = setup();
 

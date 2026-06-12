@@ -502,6 +502,13 @@ export class Daemon {
   cancelCodingSession(id: string): void {
     this.coding.cancel(id);
   }
+  /** Operator-initiated revive: feed a follow-up increment to a paused session
+   *  (the operator counterpart to the agent's send_feedback tool). No spawning run
+   *  to route back to — the result surfaces via the coding.* events. Throws if the
+   *  session isn't resumable (`paused`); the socket handler turns that into an error. */
+  feedbackToCodingSession(id: string, text: string): void {
+    this.coding.resume(id, text);
+  }
 
   /** Recent runs, optionally filtered by status (most recent first). */
   listRuns(opts: { status?: RunStatus; limit?: number } = {}): Run[] {
