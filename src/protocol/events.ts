@@ -92,6 +92,10 @@ export type ReefEvent = EventEnvelope &
         options: { index: number; label: string }[];
       }
     | { type: "coding.session.completed"; codingSessionId: string; result?: string }
+    // Handback: the agent finished this increment and is awaiting further input. The
+    // session is parked `paused` (PTY torn down) but stays revivable via --resume —
+    // increment-done, not permanently-done. Resumes the spawning manager run.
+    | { type: "coding.session.paused"; codingSessionId: string; result?: string }
     | { type: "coding.session.failed"; codingSessionId: string; error: string }
     // ── context management (Phase 3c) ────────────────────────────────────────
     // Emitted when the loop folds older messages into a durable summary to stay
