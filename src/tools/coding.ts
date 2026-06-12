@@ -10,6 +10,7 @@ const inputSchema = z.object({
   directory: z.string().describe("Absolute path of the working directory for the session."),
   task: z.string().describe("The task/prompt to give the coding agent."),
   agentKind: z.string().optional().describe("Which coding agent (default: claude-code)."),
+  model: z.string().optional().describe("Model for the coding agent (e.g. 'haiku'); default: the agent's own."),
 });
 
 export const startCodingSession: Tool<z.infer<typeof inputSchema>> = {

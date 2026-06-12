@@ -11,6 +11,9 @@ export interface StartOpts {
   task: string;
   /** Off-transcript orchestration framing (e.g. claude --append-system-prompt). */
   appendSystemPrompt?: string;
+  /** Model for the coding agent (e.g. claude --model haiku). Omitted → the agent's
+   *  own default. Lets testing run on a cheap model without burning plan usage. */
+  model?: string;
   /** Override the agent binary path; defaults to the agent's name on PATH. */
   bin?: string;
 }

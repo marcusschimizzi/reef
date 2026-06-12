@@ -31,7 +31,8 @@ class FakeHandle implements CodingDriverHandle {
 }
 class FakeDriver implements CodingAgentDriver {
   handle = new FakeHandle();
-  start(_opts: StartOpts): CodingDriverHandle { return this.handle; }
+  lastOpts?: StartOpts;
+  start(opts: StartOpts): CodingDriverHandle { this.lastOpts = opts; return this.handle; }
 }
 
 function setup(policy: ApprovalPolicy = new FakePolicy(() => ({ action: "gate" }))) {
@@ -51,6 +52,34 @@ describe("CodingSessionManager", () => {
     expect(spine.getCodingSession(id)).toMatchObject({ status: "running", agentKind: "claude-code" });
     expect(events.find((e) => e.type === "coding.session.started")).toMatchObject({ codingSessionId: id });
     expect(existsSync(spine.getCodingSession(id)!.tracePath)).toBe(true);
+  });
+
+  it("threads an explicit model to the driver", () => {
+    const { driver, mgr } = setup();
+    mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t", model: "haiku" });
+    expect(driver.lastOpts?.model).toBe("haiku");
+  });
+
+  it("falls back to REEF_CODING_MODEL when no explicit model is given", () => {
+    const { driver, mgr } = setup();
+    process.env.REEF_CODING_MODEL = "sonnet";
+    try {
+      mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+      expect(driver.lastOpts?.model).toBe("sonnet");
+    } finally {
+      delete process.env.REEF_CODING_MODEL;
+    }
+  });
+
+  it("an explicit model overrides REEF_CODING_MODEL", () => {
+    const { driver, mgr } = setup();
+    process.env.REEF_CODING_MODEL = "sonnet";
+    try {
+      mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t", model: "haiku" });
+      expect(driver.lastOpts?.model).toBe("haiku");
+    } finally {
+      delete process.env.REEF_CODING_MODEL;
+    }
   });
 
   it("forwards output and flags a detected prompt (status -> awaiting_decision)", () => {

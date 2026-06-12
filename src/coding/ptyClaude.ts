@@ -7,14 +7,20 @@
 import * as pty from "node-pty";
 import type { CodingAgentDriver, CodingDriverHandle, StartOpts } from "./driver.js";
 
+/** The `claude` argv for a session. Extracted so it's unit-testable without
+ *  spawning a real PTY. `--model` is omitted when unset (Claude Code's default). */
+export function claudeArgs(opts: StartOpts): string[] {
+  return [
+    "--session-id", opts.sessionId,
+    ...(opts.model ? ["--model", opts.model] : []),
+    ...(opts.appendSystemPrompt ? ["--append-system-prompt", opts.appendSystemPrompt] : []),
+    opts.task,
+  ];
+}
+
 export class PtyClaudeDriver implements CodingAgentDriver {
   start(opts: StartOpts): CodingDriverHandle {
-    const args = [
-      "--session-id", opts.sessionId,
-      ...(opts.appendSystemPrompt ? ["--append-system-prompt", opts.appendSystemPrompt] : []),
-      opts.task,
-    ];
-    const proc = pty.spawn(opts.bin ?? "claude", args, {
+    const proc = pty.spawn(opts.bin ?? "claude", claudeArgs(opts), {
       name: "xterm-256color",
       cols: 120,
       rows: 40,

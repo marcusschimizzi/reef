@@ -18,7 +18,7 @@ export type ControlRequest =
   // session's event history to rebuild its transcript on open.
   | { kind: "list_sessions" }
   | { kind: "history"; sessionKey: string }
-  | { kind: "coding_start"; directory: string; task: string; agentKind?: string }
+  | { kind: "coding_start"; directory: string; task: string; agentKind?: string; model?: string }
   | { kind: "coding_send"; codingSessionId: string; data: string }
   | { kind: "coding_cancel"; codingSessionId: string };
 
@@ -103,7 +103,7 @@ function handleLine(
       );
       break;
     case "coding_start": {
-      const id = daemon.startCodingSession({ agentKind: req.agentKind ?? "claude-code", directory: req.directory, task: req.task });
+      const id = daemon.startCodingSession({ agentKind: req.agentKind ?? "claude-code", directory: req.directory, task: req.task, model: req.model });
       sock.write(`${JSON.stringify({ kind: "coding_started", codingSessionId: id })}\n`);
       break;
     }

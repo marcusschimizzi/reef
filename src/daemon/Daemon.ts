@@ -487,7 +487,7 @@ export class Daemon {
   }
 
   // ── coding-agent control (operator-initiated in Step 1) ─────────────────────
-  startCodingSession(opts: { agentKind: string; directory: string; task: string }): string {
+  startCodingSession(opts: { agentKind: string; directory: string; task: string; model?: string }): string {
     return this.coding.start(opts);
   }
   sendToCodingSession(id: string, data: string): void {
@@ -720,6 +720,7 @@ export class Daemon {
               agentKind: input.agentKind ?? "claude-code",
               directory: input.directory,
               task: input.task,
+              model: input.model,
               spawningRunId: r.id,
               spawningToolUseId: call.id,
               source: src,

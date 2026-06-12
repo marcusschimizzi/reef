@@ -41,6 +41,9 @@ export interface StartCodingSession {
   spawningRunId?: string | null;
   spawningToolUseId?: string | null;
   source?: RunSource;
+  /** Model for the coding agent (e.g. "haiku"). Falls back to the REEF_CODING_MODEL
+   *  env var, else the agent's own default. */
+  model?: string;
 }
 
 interface Live {
@@ -82,6 +85,7 @@ export class CodingSessionManager {
       sessionId: externalSessionId,
       task: opts.task,
       appendSystemPrompt: this.deps.appendSystemPrompt,
+      model: opts.model ?? process.env.REEF_CODING_MODEL,
     });
     this.live.set(id, { handle, processor, trace, source: opts.source ?? { kind: "message" } });
 
