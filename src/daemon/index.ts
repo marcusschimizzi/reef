@@ -128,14 +128,24 @@ for (const w of config.watches) {
 }
 
 const server = startSocketServer(daemon, SOCKET_PATH, DEFAULT_AGENT.id);
+const HTTP_HOST = process.env.REEF_HTTP_HOST ?? "127.0.0.1";
+const HTTP_ALLOWED_ORIGINS = (process.env.REEF_ALLOWED_ORIGINS ?? "")
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
 const httpServer = startHttpInterface(daemon, {
   port: HTTP_PORT,
+  host: HTTP_HOST,
   defaultAgentId: DEFAULT_AGENT.id,
   apiKey: HTTP_API_KEY,
+  allowedOrigins: HTTP_ALLOWED_ORIGINS,
 });
-process.stderr.write(
-  `reef daemon listening on ${SOCKET_PATH} and http://127.0.0.1:${HTTP_PORT}\n`,
-);
+httpServer.once("listening", () => {
+  const addr = httpServer.address();
+  const where =
+    typeof addr === "object" && addr ? `http://${HTTP_HOST}:${addr.port}` : `port ${HTTP_PORT}`;
+  process.stderr.write(`reef daemon listening on ${SOCKET_PATH} and ${where}\n`);
+});
 
 let shuttingDown = false;
 const shutdown = (): void => {

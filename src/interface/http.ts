@@ -12,8 +12,21 @@ import { ConchProjector } from "./adapters/conch.js";
 export interface HttpInterfaceOptions {
   port: number;
   defaultAgentId: string;
+  /**
+   * Host to bind. Defaults to `127.0.0.1` (loopback) — the daemon runs shell
+   * commands and resolves approvals, so it must NOT be reachable from the LAN by
+   * default. Binding a routable address is a separate, deliberate choice.
+   */
+  host?: string;
   /** If set, requests must carry `Authorization: Bearer <apiKey>`. */
   apiKey?: string;
+  /**
+   * Origins permitted to call the daemon from a browser. A request carrying any
+   * `Origin` header not in this list is rejected — the DNS-rebinding / CSRF
+   * defense for a localhost daemon. Non-browser clients (conch's server-side SSE
+   * pipe, curl) send no Origin and are unaffected. Defaults to none allowed.
+   */
+  allowedOrigins?: string[];
 }
 
 export function startHttpInterface(
@@ -25,7 +38,7 @@ export function startHttpInterface(
       sendJson(res, 500, { ok: false, error: String(err) });
     });
   });
-  server.listen(opts.port);
+  server.listen(opts.port, opts.host ?? "127.0.0.1");
   return server;
 }
 
@@ -38,6 +51,14 @@ async function handle(
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = url.pathname;
   const method = req.method ?? "GET";
+
+  // DNS-rebinding / CSRF defense: a browser always sends Origin on cross-origin
+  // (and same-origin non-GET) requests; reject any Origin we didn't allow. Clients
+  // that send no Origin (server-side fetch, curl) are unaffected.
+  const origin = req.headers.origin;
+  if (origin !== undefined && !(typeof origin === "string" && (opts.allowedOrigins ?? []).includes(origin))) {
+    return sendJson(res, 403, { ok: false, error: "forbidden origin" });
+  }
 
   if (method === "GET" && path === "/health") {
     return sendJson(res, 200, { ok: true });
