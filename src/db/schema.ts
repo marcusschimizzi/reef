@@ -209,6 +209,7 @@ function migrate(db: Database): void {
   addColumnIfMissing(db, "coding_sessions", "spawning_tool_use_id", "TEXT");
   addColumnIfMissing(db, "coding_sessions", "model", "TEXT");
   addColumnIfMissing(db, "runs", "source", "TEXT"); // JSON RunSource — durable so recovery re-drives under the right policy
+  addColumnIfMissing(db, "coding_sessions", "owner_agent_id", "TEXT"); // stable creator — survives spawning-run relinks (send_feedback scoping)
 }
 
 function addColumnIfMissing(

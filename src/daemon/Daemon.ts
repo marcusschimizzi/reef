@@ -345,7 +345,7 @@ export class Daemon {
     // suspended (awaiting approval/subwork) before the crash is NOT re-driven here — it
     // resumes later when its approval resolves — and that resume path won't re-emit
     // run.started, so without this seed routeApproval wouldn't know it's proactive.
-    for (const run of this.spine.listRuns({ status: "suspended" })) {
+    for (const run of this.spine.listSuspendedRuns()) {
       this.runMeta.set(run.id, { proactive: run.source?.kind === "trigger", agentId: run.agentId });
     }
     // A coding session left non-terminal by a crash has a dead PTY (its child process
@@ -582,7 +582,7 @@ export class Daemon {
    */
   runsAwaitingApproval(): Array<{ run: Run; approvals: Approval[] }> {
     return this.spine
-      .listRuns({ status: "suspended" })
+      .listSuspendedRuns()
       .filter((r) => r.stopReason === "awaiting_approval")
       .map((run) => ({
         run,
@@ -795,9 +795,11 @@ export class Daemon {
               // could push attacker/model-controlled task+dir into a repo it never
               // initiated. The throw becomes a graceful isError tool_result (the loop's
               // startSubwork catch), so the model can recover rather than the run failing.
+              // Scope on the STABLE owner (stamped at creation), not the spawning run —
+              // operator/agent revives rewrite spawning_run_id, which would otherwise
+              // lock the owning agent out of its own session.
               const cs = this.spine.getCodingSession(input.sessionId);
-              const owner = cs?.spawningRunId ? this.spine.getRun(cs.spawningRunId)?.agentId : undefined;
-              if (!cs || owner !== r.agentId) {
+              if (!cs || cs.ownerAgentId !== r.agentId) {
                 throw new Error(
                   `send_feedback denied: coding session ${input.sessionId} was not started by this agent`,
                 );

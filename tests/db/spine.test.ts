@@ -26,6 +26,47 @@ const agent: AgentRecord = {
   toolAllowlist: ["echo"],
 };
 
+describe("Spine — batch-3 review fixes", () => {
+  it("listSuspendedRuns returns ALL suspended runs, unbounded (recovery must not page) — RF-07 seed", () => {
+    const spine = new Spine(tempDbPath());
+    spine.upsertAgent(agent);
+    spine.ensureSession("s1", agent.id);
+    for (let i = 0; i < 55; i++) {
+      spine.createRun({ id: `run_${i}`, agentId: agent.id, sessionKey: "s1", source: { kind: "trigger", triggerId: `t${i}`, triggerType: "schedule" } });
+      spine.setRunStatus(`run_${i}`, "suspended", { stopReason: "awaiting_approval" });
+    }
+    // the paged listRuns caps at its default 50 — recovery would silently drop 5
+    expect(spine.listRuns({ status: "suspended" }).length).toBe(50);
+    // the recovery seed must see every one
+    expect(spine.listSuspendedRuns().length).toBe(55);
+    spine.close();
+  });
+
+  it("a coding session records its owning agent, immutable across a spawning-run relink (finding #4 owner)", () => {
+    const spine = new Spine(tempDbPath());
+    spine.upsertAgent(agent);
+    spine.ensureSession("s1", agent.id);
+    spine.createRun({ id: "run_owner", agentId: agent.id, sessionKey: "s1" });
+    spine.createCodingSession({
+      id: "cs_1",
+      spawningRunId: "run_owner",
+      spawningToolUseId: "tool_1",
+      agentKind: "claude-code",
+      externalSessionId: "ext_1",
+      directory: "/tmp/x",
+      status: "running",
+      task: "t",
+      tracePath: "/tmp/cs_1.jsonl",
+    });
+    expect(spine.getCodingSession("cs_1")!.ownerAgentId).toBe(agent.id);
+
+    // an operator coding_feedback revive nulls the spawning link — the owner must NOT change
+    spine.relinkCodingSessionSubwork("cs_1", null, null);
+    expect(spine.getCodingSession("cs_1")!.ownerAgentId).toBe(agent.id);
+    spine.close();
+  });
+});
+
 describe("Spine", () => {
   it("round-trips an agent record", () => {
     const spine = new Spine(tempDbPath());

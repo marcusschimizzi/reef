@@ -38,6 +38,11 @@ export interface CodingSessionRecord {
   id: string;
   spawningRunId: string | null;
   spawningToolUseId: string | null;
+  /** The reef agent that originally started this session — derived from the spawning
+   *  run at creation and NEVER changed by a relink (operator/agent revives rewrite
+   *  spawning_run_id). It's the stable basis for send_feedback ownership scoping.
+   *  Null for an operator-started session (no spawning run). */
+  ownerAgentId?: string | null;
   agentKind: string;
   externalSessionId: string;
   directory: string;
@@ -487,6 +492,19 @@ export class Spine {
     return rows.map(rowToRun);
   }
 
+  /**
+   * EVERY suspended run, unbounded — for recovery's runMeta seed and the
+   * awaiting-approval view. Unlike `listRuns({status:"suspended"})` (paged, default
+   * 50), this must not silently drop runs: a dropped proactive run would lose its
+   * route-mode approval routing on resume and deadlock.
+   */
+  listSuspendedRuns(): Run[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM runs WHERE status = 'suspended' ORDER BY started_at DESC`)
+      .all() as RunRow[];
+    return rows.map(rowToRun);
+  }
+
   // ── steps (the durable unit of progress) ───────────────────────────────────
   beginStep(runId: string, index: number): void {
     // INSERT OR REPLACE so re-driving a step left pending by a crash is
@@ -784,14 +802,17 @@ export class Spine {
   }
 
   // ── coding sessions ───────────────────────────────────────────────────────
-  createCodingSession(rec: Omit<CodingSessionRecord, "createdAt" | "result" | "endedAt">): void {
+  createCodingSession(rec: Omit<CodingSessionRecord, "createdAt" | "result" | "endedAt" | "ownerAgentId">): void {
+    // Stamp the owning agent from the spawning run NOW — later relinks (revives)
+    // rewrite spawning_run_id, so the owner can't be re-derived from it afterward.
+    const ownerAgentId = rec.spawningRunId ? (this.getRun(rec.spawningRunId)?.agentId ?? null) : null;
     this.db
       .prepare(
         `INSERT INTO coding_sessions
-           (id, spawning_run_id, spawning_tool_use_id, agent_kind, external_session_id, directory, status, task, model, trace_path, created_at)
-         VALUES (@id, @spawningRunId, @spawningToolUseId, @agentKind, @externalSessionId, @directory, @status, @task, @model, @tracePath, @createdAt)`,
+           (id, spawning_run_id, spawning_tool_use_id, owner_agent_id, agent_kind, external_session_id, directory, status, task, model, trace_path, created_at)
+         VALUES (@id, @spawningRunId, @spawningToolUseId, @ownerAgentId, @agentKind, @externalSessionId, @directory, @status, @task, @model, @tracePath, @createdAt)`,
       )
-      .run({ ...rec, model: rec.model ?? null, createdAt: nowIso() });
+      .run({ ...rec, ownerAgentId, model: rec.model ?? null, createdAt: nowIso() });
   }
 
   /** Re-point a (paused) coding session at the run + tool_use that is reviving it,
@@ -1015,6 +1036,7 @@ function rowToCodingSession(row: Record<string, unknown>): CodingSessionRecord {
     id: row.id as string,
     spawningRunId: (row.spawning_run_id as string | null) ?? null,
     spawningToolUseId: (row.spawning_tool_use_id as string | null) ?? null,
+    ownerAgentId: (row.owner_agent_id as string | null) ?? null,
     agentKind: row.agent_kind as string,
     externalSessionId: row.external_session_id as string,
     directory: row.directory as string,
