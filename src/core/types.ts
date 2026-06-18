@@ -89,6 +89,10 @@ export interface Run {
   parentRunId?: string;
   startedAt: string; // ISO-8601
   endedAt?: string;
+  /** How this run was woken (message vs trigger). Durable so a run recovered after a
+   *  crash (or resumed) is re-driven under the right policy — a proactive run must keep
+   *  auto-denying gated tools, since there's no human attached to approve. */
+  source?: RunSource;
 }
 
 export type ApprovalStatus = "pending" | "allowed" | "denied";

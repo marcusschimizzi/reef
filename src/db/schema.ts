@@ -208,6 +208,7 @@ function migrate(db: Database): void {
   addColumnIfMissing(db, "sessions", "model", "TEXT");
   addColumnIfMissing(db, "coding_sessions", "spawning_tool_use_id", "TEXT");
   addColumnIfMissing(db, "coding_sessions", "model", "TEXT");
+  addColumnIfMissing(db, "runs", "source", "TEXT"); // JSON RunSource — durable so recovery re-drives under the right policy
 }
 
 function addColumnIfMissing(

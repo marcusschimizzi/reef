@@ -177,6 +177,51 @@ describe("Daemon", () => {
     daemon.close();
   });
 
+  it("a recovered proactive run still auto-denies gated tools (durable RunSource, RF-07)", async () => {
+    const dir = tempDir();
+    const dbPath = join(dir, "reef.db");
+    const gated: AgentRecord = { ...agent, toolAllowlist: ["shell"] };
+
+    // ── crash: a proactive (trigger-sourced) run left mid-flight with a pending step ──
+    {
+      const spine = new Spine(dbPath);
+      spine.upsertAgent(gated);
+      spine.ensureSession("trg-session", gated.id);
+      spine.appendMessage("trg-session", "user", [{ type: "text", text: "scheduled wake" }]);
+      const run = spine.createRun({
+        id: "run_pro",
+        agentId: gated.id,
+        sessionKey: "trg-session",
+        source: { kind: "trigger", triggerId: "t1", triggerType: "schedule" },
+      });
+      // the source must be durable, not just in-memory
+      expect(spine.getRun("run_pro")?.source).toEqual({ kind: "trigger", triggerId: "t1", triggerType: "schedule" });
+      expect(run.source?.kind).toBe("trigger");
+      spine.beginStep("run_pro", 0); // model call started, never returned
+      spine.close();
+    }
+
+    // ── a fresh daemon recovers and re-drives the run; it must apply the PROACTIVE
+    //    policy (auto-deny the gated shell, no human) — not gate-and-deadlock ──
+    const daemon = new Daemon({
+      dbPath,
+      workspaceDir: join(dir, "ws"),
+      router: new FakeRouter([
+        { stop: "tool_use", content: [{ type: "tool_use", id: "s1", name: "shell", input: { command: "echo hi" } }], usage: { inputTokens: 5, outputTokens: 2 } },
+        { stop: "completed", content: [{ type: "text", text: "proceeding without it" }], usage: { inputTokens: 4, outputTokens: 1 } },
+      ]),
+    });
+    daemon.registerAgent(gated);
+
+    await daemon.recover();
+
+    expect(daemon.spine.getRun("run_pro")!.status).toBe("completed"); // NOT suspended/deadlocked
+    expect(
+      daemon.listActions({ runId: "run_pro" }).some((a) => a.toolName === "shell" && a.decision === "deny"),
+    ).toBe(true);
+    daemon.close();
+  });
+
   it("recovers an interrupted run by re-driving it from the durable record", async () => {
     const dir = tempDir();
     const dbPath = join(dir, "reef.db");

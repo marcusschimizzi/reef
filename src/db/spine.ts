@@ -12,6 +12,7 @@ import type {
   Message,
   Role,
   Run,
+  RunSource,
   RunStatus,
   SessionStatus,
   SessionSummary,
@@ -110,6 +111,7 @@ interface RunRow {
   parent_run_id: string | null;
   started_at: string;
   ended_at: string | null;
+  source: string | null;
 }
 interface StepRow {
   run_id: string;
@@ -409,12 +411,13 @@ export class Spine {
     agentId: string;
     sessionKey: string;
     parentRunId?: string;
+    source?: RunSource;
   }): Run {
     const startedAt = nowIso();
     this.db
       .prepare(
-        `INSERT INTO runs (id, agent_id, session_key, status, parent_run_id, started_at)
-         VALUES (?, ?, ?, 'running', ?, ?)`,
+        `INSERT INTO runs (id, agent_id, session_key, status, parent_run_id, started_at, source)
+         VALUES (?, ?, ?, 'running', ?, ?, ?)`,
       )
       .run(
         input.id,
@@ -422,6 +425,7 @@ export class Spine {
         input.sessionKey,
         input.parentRunId ?? null,
         startedAt,
+        input.source ? JSON.stringify(input.source) : null,
       );
     return {
       id: input.id,
@@ -430,6 +434,7 @@ export class Spine {
       status: "running",
       parentRunId: input.parentRunId,
       startedAt,
+      source: input.source,
     };
   }
 
@@ -921,6 +926,7 @@ function rowToRun(row: RunRow): Run {
     parentRunId: row.parent_run_id ?? undefined,
     startedAt: row.started_at,
     endedAt: row.ended_at ?? undefined,
+    source: row.source ? (JSON.parse(row.source) as RunSource) : undefined,
   };
 }
 

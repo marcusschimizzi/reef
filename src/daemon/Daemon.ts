@@ -332,6 +332,13 @@ export class Daemon {
    * returned here — they resume only when their approvals resolve.
    */
   async recover(): Promise<void> {
+    // Rebuild the in-memory run→source routing map from the durable record. A run
+    // suspended (awaiting approval/subwork) before the crash is NOT re-driven here — it
+    // resumes later when its approval resolves — and that resume path won't re-emit
+    // run.started, so without this seed routeApproval wouldn't know it's proactive.
+    for (const run of this.spine.listRuns({ status: "suspended" })) {
+      this.runMeta.set(run.id, { proactive: run.source?.kind === "trigger", agentId: run.agentId });
+    }
     // A coding session left non-terminal by a crash has a dead PTY (its child process
     // died with the daemon) but its row still says running, and its spawning run is
     // parked `awaiting_subwork` — which getInterruptedRuns does NOT return, so it would
@@ -666,6 +673,7 @@ export class Daemon {
       id: newRunId(),
       agentId: wake.agentId,
       sessionKey: wake.sessionKey,
+      source: { kind: "message" },
     });
     this.sink.emit({
       type: "message.received",
@@ -692,17 +700,18 @@ export class Daemon {
       ? `${trigger.input}\n\n(file event: ${event.type} at ${event.path})`
       : trigger.input;
     this.spine.appendMessage(trigger.sessionKey, "user", [{ type: "text", text }]);
-    const run = this.spine.createRun({
-      id: newRunId(),
-      agentId: trigger.agentId,
-      sessionKey: trigger.sessionKey,
-    });
     const source: RunSource = {
       kind: "trigger",
       triggerId: trigger.id,
       triggerType: trigger.type,
       ...(event ? { event } : {}),
     };
+    const run = this.spine.createRun({
+      id: newRunId(),
+      agentId: trigger.agentId,
+      sessionKey: trigger.sessionKey,
+      source,
+    });
     this.sink.emit({
       type: "message.received",
       text,
@@ -725,6 +734,12 @@ export class Daemon {
   }
 
   private async runLoop(run: Run, options: LoopOptions = {}): Promise<void> {
+    // Resolve the wake source: an explicit option wins, else the run's DURABLE source
+    // (so a recovered/resumed run keeps its proactive policy), else a plain message.
+    const resolvedOptions: LoopOptions = {
+      ...options,
+      source: options.source ?? run.source ?? { kind: "message" },
+    };
     const agent = this.spine.getAgent(run.agentId);
     if (!agent) {
       this.spine.setRunStatus(run.id, "failed", {
@@ -798,7 +813,7 @@ export class Daemon {
             };
           },
         },
-        options,
+        resolvedOptions,
       );
     } finally {
       this.aborters.delete(run.sessionKey);
