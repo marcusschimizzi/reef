@@ -141,7 +141,7 @@ export class CodingSessionManager {
    *  Re-links the session to the reviving run+tool so the new result routes back.
    *  Throws if the session isn't a resumable `paused` one (→ a graceful error
    *  tool_result via the loop's subwork-failure path). */
-  resume(sessionId: string, text: string, opts: { spawningRunId?: string | null; spawningToolUseId?: string | null } = {}): void {
+  resume(sessionId: string, text: string, opts: { spawningRunId?: string | null; spawningToolUseId?: string | null; source?: RunSource } = {}): void {
     const cs = this.deps.spine.getCodingSession(sessionId);
     // `paused` = handed back; `process_lost` = interrupted by a crash. Both are
     // revivable via `claude --resume <uuid>` (the session JSONL survives on disk).
@@ -156,7 +156,10 @@ export class CodingSessionManager {
       directory: cs.directory,
       task: text,
       model: cs.model,
-      source: { kind: "message" },
+      // Govern the revived increment under the REVIVING run's source: a proactive
+      // (trigger/heartbeat) send_feedback must run under proactive policy so an inner
+      // prompt auto-denies instead of gating with no human to answer.
+      source: opts.source ?? { kind: "message" },
       resume: true,
       tracePath: cs.tracePath,
     });

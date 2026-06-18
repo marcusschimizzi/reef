@@ -256,6 +256,26 @@ describe("CodingSessionManager", () => {
     }
   });
 
+  it("resume() governs the revived increment under the reviving run's source (finding #2)", () => {
+    // deny proactive prompts, gate interactive — mirrors DefaultPolicy's proactive auto-deny.
+    const policy = new FakePolicy((ctx) => (ctx.source.kind === "trigger" ? { action: "deny" } : { action: "gate" }));
+    const { spine, driver, mgr, getTrigger } = setup(policy);
+    const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+    // hand back → paused
+    getTrigger()!();
+    driver.handle.die(143);
+    expect(spine.getCodingSession(id)!.status).toBe("paused");
+
+    // revive under a PROACTIVE source (a trigger run calling send_feedback).
+    mgr.resume(id, "continue", { source: { kind: "trigger", triggerId: "trg", triggerType: "schedule" } });
+
+    // an inner prompt in the revived increment must be auto-denied (No), not gated &
+    // hung — i.e. the policy must see the proactive source, not a hardcoded "message".
+    driver.handle.feed("Do you want to edit a.ts?\n❯ 1. Yes\n  2. No\n");
+    expect(policy.last?.source.kind).toBe("trigger");
+    expect(driver.handle.written).toContain("2\r");
+  });
+
   it("a session that produces NO output is killed by the startup liveness timer and recorded failed", () => {
     vi.useFakeTimers();
     try {

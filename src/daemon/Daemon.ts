@@ -766,7 +766,7 @@ export class Daemon {
               // A revive intentionally re-links the SAME session to this run+tool, so
               // (unlike start) it must NOT short-circuit on a prior subwork link.
               const input = sendFeedback.inputSchema.parse(call.input);
-              this.coding.resume(input.sessionId, input.text, { spawningRunId: r.id, spawningToolUseId: call.id });
+              this.coding.resume(input.sessionId, input.text, { spawningRunId: r.id, spawningToolUseId: call.id, source: src });
               return input.sessionId;
             }
             // Idempotent: if this (run, toolUse) already spawned a session, reuse it
