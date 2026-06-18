@@ -309,6 +309,52 @@ describe("Daemon coding-session control", () => {
     daemon.close();
   });
 
+  it("send_feedback refuses to revive a coding session this agent did not start (finding #4 scoping)", async () => {
+    const dir = tmp();
+    const driver = new FakeDriver();
+    let trigger: (() => void) | undefined;
+    let opSessionId = "";
+    let turn = 0;
+    const router: ModelRouter = {
+      async generateTurn(input: ModelTurnInput): Promise<ModelTurn> {
+        turn++;
+        if (turn === 1) {
+          return { stop: "tool_use", content: [{ type: "tool_use", id: "tool_1", name: "send_feedback", input: { sessionId: opSessionId, text: "hijack the operator's repo" } }], usage: { inputTokens: 5, outputTokens: 2 } };
+        }
+        input.onTextDelta?.("acknowledged the refusal");
+        return { stop: "completed", content: [{ type: "text", text: "acknowledged the refusal" }], usage: { inputTokens: 4, outputTokens: 1 } };
+      },
+    };
+    const d = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      codingTraceDir: join(dir, "traces"),
+      codingWatchHandbackFile: (_f, on) => { trigger = on; return () => { trigger = undefined; }; },
+      router,
+      policy: new AllowPolicy(),
+      codingDriver: driver,
+    });
+    d.registerAgent({ ...agent, toolAllowlist: ["send_feedback"] });
+
+    // An OPERATOR starts a coding session (no spawning run) and it hands back → paused.
+    opSessionId = d.startCodingSession({ agentKind: "claude-code", directory: tmp(), task: "operator work" });
+    trigger!();
+    driver.handle.die(143);
+    expect(d.spine.getCodingSession(opSessionId)!.status).toBe("paused");
+
+    // The agent tries to revive the operator's session via send_feedback.
+    await d.submit({ sessionKey: "s1", agentId: "reef", message: "go" });
+
+    // Refused: the session is NOT revived (still paused), and the run got a graceful
+    // isError tool_result instead of pushing model-controlled work into that repo.
+    expect(d.spine.getCodingSession(opSessionId)!.status).toBe("paused");
+    const run = d.listRuns({}).find((r) => r.sessionKey === "s1")!;
+    expect(run.status).toBe("completed");
+    const toolMsg = d.spine.getMessages("s1").find((m) => m.role === "tool");
+    expect(toolMsg?.content[0]).toMatchObject({ isError: true });
+    d.close();
+  });
+
   it("recovers a coding session orphaned by a daemon restart: marks it process_lost and resumes the stranded run", async () => {
     const dir = tmp();
     const workDir = tmp();

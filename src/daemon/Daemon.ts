@@ -781,6 +781,18 @@ export class Daemon {
               // A revive intentionally re-links the SAME session to this run+tool, so
               // (unlike start) it must NOT short-circuit on a prior subwork link.
               const input = sendFeedback.inputSchema.parse(call.input);
+              // Scope: an agent may only revive a coding session one of ITS OWN runs
+              // started — not an operator's or another agent's. Otherwise the model
+              // could push attacker/model-controlled task+dir into a repo it never
+              // initiated. The throw becomes a graceful isError tool_result (the loop's
+              // startSubwork catch), so the model can recover rather than the run failing.
+              const cs = this.spine.getCodingSession(input.sessionId);
+              const owner = cs?.spawningRunId ? this.spine.getRun(cs.spawningRunId)?.agentId : undefined;
+              if (!cs || owner !== r.agentId) {
+                throw new Error(
+                  `send_feedback denied: coding session ${input.sessionId} was not started by this agent`,
+                );
+              }
               this.coding.resume(input.sessionId, input.text, { spawningRunId: r.id, spawningToolUseId: call.id, source: src });
               return input.sessionId;
             }
