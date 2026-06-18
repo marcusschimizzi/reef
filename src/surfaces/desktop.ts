@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { safeChildEnv } from "../core/env.js";
 import { summarize, type Notification, type Surface } from "./surface.js";
 
 // A desktop-notification surface. macOS via `osascript display notification`;
@@ -6,11 +7,12 @@ import { summarize, type Notification, type Surface } from "./surface.js";
 // same shape). The exec fn is injectable so tests don't actually post a
 // notification.
 
-export type Exec = (cmd: string, args: string[]) => void;
+export type ExecOpts = { env: NodeJS.ProcessEnv };
+export type Exec = (cmd: string, args: string[], opts: ExecOpts) => void;
 
-const defaultExec: Exec = (cmd, args) => {
+const defaultExec: Exec = (cmd, args, opts) => {
   // fire-and-forget; ignore errors (a missing binary must not break a run)
-  execFile(cmd, args, () => {});
+  execFile(cmd, args, opts, () => {});
 };
 
 export class DesktopSurface implements Surface {
@@ -24,7 +26,10 @@ export class DesktopSurface implements Surface {
   async notify(n: Notification): Promise<void> {
     const { title, body } = summarize(n);
     if (this.platform === "darwin") {
-      this.exec("osascript", ["-e", `display notification ${osa(body)} with title ${osa(title)}`]);
+      // Curated env — osascript has no need for the daemon's API keys/tokens.
+      this.exec("osascript", ["-e", `display notification ${osa(body)} with title ${osa(title)}`], {
+        env: safeChildEnv(),
+      });
     }
     // non-darwin: no-op (no assumption about an installed notifier)
   }

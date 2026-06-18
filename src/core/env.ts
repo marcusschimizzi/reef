@@ -28,6 +28,20 @@ const CHILD_ENV_ALLOWLIST: readonly string[] = [
   "TZ",
   "TERM",
   "COLORTERM",
+  // Network egress — NOT secrets, but the spawned `claude` (whose whole purpose is
+  // reaching api.anthropic.com on-plan) and shell commands (git/npm/curl) break
+  // silently without them behind a corporate proxy or custom CA.
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "ALL_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "no_proxy",
+  "all_proxy",
+  "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
 ];
 
 /**
