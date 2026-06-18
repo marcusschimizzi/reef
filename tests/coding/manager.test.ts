@@ -36,7 +36,7 @@ class FakeDriver implements CodingAgentDriver {
   start(opts: StartOpts): CodingDriverHandle { this.lastOpts = opts; return this.handle; }
 }
 
-function setup(policy: ApprovalPolicy = new FakePolicy(() => ({ action: "gate" })), idleMs?: number) {
+function setup(policy: ApprovalPolicy = new FakePolicy(() => ({ action: "gate" })), idleMs?: number, startupMs?: number) {
   const dir = tmp();
   const spine = new Spine(join(dir, "reef.db"));
   const events: ReefEvent[] = [];
@@ -53,7 +53,7 @@ function setup(policy: ApprovalPolicy = new FakePolicy(() => ({ action: "gate" }
     return () => { triggerStopHook = undefined; disposed = true; };
   };
   const mgr = new CodingSessionManager({
-    spine, emit, driver, traceDir: join(dir, "traces"), policy, idleMs, watchHandbackFile,
+    spine, emit, driver, traceDir: join(dir, "traces"), policy, idleMs, startupMs, watchHandbackFile,
   });
   return {
     spine, events, driver, mgr, dir,
@@ -251,6 +251,37 @@ describe("CodingSessionManager", () => {
       driver.handle.die(143); // exit finalizes paused
       expect(events.find((e) => e.type === "coding.session.paused")).toMatchObject({ codingSessionId: id });
       expect(spine.getCodingSession(id)!.status).toBe("paused");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a session that produces NO output is killed by the startup liveness timer and recorded failed", () => {
+    vi.useFakeTimers();
+    try {
+      const { spine, events, mgr, driver } = setup(new FakePolicy(() => ({ action: "allow" })), 5000, 30);
+      const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+      // No output is ever fed — the spawn is stuck (e.g. a hung auth prompt). The
+      // idle timer never arms (it arms on output), so only the startup timer saves us.
+      vi.advanceTimersByTime(40); // > startupMs (30), < idleMs (5000)
+      expect(driver.handle.killed).toBe(true);
+      driver.handle.die(143); // the kill exits the PTY → onExit records the failure
+      expect(spine.getCodingSession(id)!.status).toBe("failed");
+      const failed = events.find((e) => e.type === "coding.session.failed") as { error: string } | undefined;
+      expect(failed?.error).toMatch(/no output|failed to start/i);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("first output disarms the startup timer (a normal session is not killed)", () => {
+    vi.useFakeTimers();
+    try {
+      const { mgr, driver } = setup(new FakePolicy(() => ({ action: "allow" })), 5000, 30);
+      mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+      driver.handle.feed("banner appears\n"); // first output before startupMs disarms it
+      vi.advanceTimersByTime(40); // past startupMs — must NOT kill (idle window is 5000)
+      expect(driver.handle.killed).toBe(false);
     } finally {
       vi.useRealTimers();
     }

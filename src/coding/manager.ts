@@ -39,6 +39,10 @@ export interface CodingSessionManagerDeps {
   appendSystemPrompt?: string;
   /** Idle window (ms) after the last output before the session hands back. */
   idleMs?: number;
+  /** Startup window (ms): if the spawned agent produces NO output within this
+   *  window it's treated as a failed start (stuck auth, hung spawn) and killed —
+   *  the idle timer only arms on output, so a zero-output hang needs this guard. */
+  startupMs?: number;
   /** Watch a handback sentinel file for creation; returns a disposer. Injected in
    *  tests to trigger the signal deterministically. Defaults to an fs watcher. */
   watchHandbackFile?: (file: string, onSignal: () => void) => () => void;
@@ -62,6 +66,9 @@ interface Live {
   trace: TraceWriter;
   source: RunSource;
   idleTimer?: ReturnType<typeof setTimeout>;
+  /** Liveness timer armed at launch; a zero-output spawn that never arms idle is
+   *  killed when this fires. Cleared on first output. */
+  startupTimer?: ReturnType<typeof setTimeout>;
   /** Latch: once handed back (sentinel or idle), never act again. */
   handedBack: boolean;
   /** Disposer for the Stop-hook sentinel-file watcher; cleared on teardown. */
@@ -84,8 +91,10 @@ export class CodingSessionManager {
    *  default so legitimate gaps — model thinking, a slow build, a big grep — don't
    *  prematurely kill an active session. Bad env → NaN → falsy → default. */
   private readonly idleMs: number;
+  private readonly startupMs: number;
   constructor(private readonly deps: CodingSessionManagerDeps) {
     this.idleMs = deps.idleMs ?? (Number(process.env.REEF_CODING_IDLE_MS) || 300_000);
+    this.startupMs = deps.startupMs ?? (Number(process.env.REEF_CODING_STARTUP_MS) || 60_000);
   }
 
   start(opts: StartCodingSession): string {
@@ -198,7 +207,14 @@ export class CodingSessionManager {
     const watch = this.deps.watchHandbackFile ?? defaultWatchHandbackFile;
     const dispose = watch(handbackFile, () => this.handback(id, "stop-hook"));
     const l0 = this.live.get(id);
-    if (l0) l0.disposeWatch = dispose;
+    if (l0) {
+      l0.disposeWatch = dispose;
+      // Arm the startup liveness timer: a spawn that produces NO output (the idle
+      // timer arms only on output) — e.g. a stuck auth prompt or hung binary —
+      // would otherwise leave the session running and its spawning run parked
+      // forever. First output disarms it.
+      l0.startupTimer = setTimeout(() => this.onStartupTimeout(id), this.startupMs);
+    }
 
     handle.onData((chunk) => {
       trace.write({ type: "pty.raw", bytes: Buffer.from(chunk, "utf8").toString("base64") });
@@ -285,6 +301,8 @@ export class CodingSessionManager {
     const l = this.live.get(id);
     l?.trace.write({ type: "event", event: ev });
     if (ev.type === "output") {
+      // First output → the spawn is alive; disarm the startup liveness timer.
+      if (l?.startupTimer) { clearTimeout(l.startupTimer); l.startupTimer = undefined; }
       if (l) l.sawOutput = true;
       this.emitCoding(id, { type: "coding.output", codingSessionId: id, text: ev.text });
       // Handback is detected by the Stop hook (post-turn-completion) + idle, both of
@@ -306,7 +324,21 @@ export class CodingSessionManager {
   }
   private disarmIdle(id: string): void {
     const l = this.live.get(id);
-    if (l?.idleTimer) { clearTimeout(l.idleTimer); l.idleTimer = undefined; }
+    if (!l) return;
+    if (l.idleTimer) { clearTimeout(l.idleTimer); l.idleTimer = undefined; }
+    if (l.startupTimer) { clearTimeout(l.startupTimer); l.startupTimer = undefined; }
+  }
+
+  /** Startup liveness timer fired: the agent produced no output in the window, so
+   *  the spawn is stuck (hung auth / bad binary). Kill it WITHOUT a handback/cancel
+   *  flag → onExit's failed branch records the zero-output "likely failed to start"
+   *  diagnostic and resumes the spawning run, instead of hanging awaiting_subwork. */
+  private onStartupTimeout(id: string): void {
+    const l = this.live.get(id);
+    if (!l || l.sawOutput || l.handedBack) return;
+    l.startupTimer = undefined;
+    l.trace.write({ type: "lifecycle", event: "startup-timeout" });
+    l.handle.kill();
   }
 
   /** Dispose the Stop-hook sentinel watcher so no fs.watch leaks and a late Stop
