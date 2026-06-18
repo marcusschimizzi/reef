@@ -15,6 +15,21 @@ import type { ContentBlock, RunSource, StopReason, Usage } from "../core/types.j
 /** Mirrors conch's approval decisions so the projection is lossless. */
 export type ApprovalDecision = "allow-once" | "allow-always" | "deny";
 
+const APPROVAL_DECISIONS: readonly ApprovalDecision[] = ["allow-once", "allow-always", "deny"];
+
+/**
+ * Whitelist an untrusted decision string into the canonical vocabulary, failing
+ * CLOSED: anything that isn't an exact, known decision becomes `deny`. The daemon
+ * resolves approvals from the socket/HTTP wire where the decision is attacker- or
+ * bug-controlled; an allow-by-default mapping (`x !== "deny" ? allow : deny`)
+ * turned empty strings, mis-casing, and garbage into grants. Match exactly here.
+ */
+export function parseApprovalDecision(raw: string): ApprovalDecision {
+  return (APPROVAL_DECISIONS as readonly string[]).includes(raw)
+    ? (raw as ApprovalDecision)
+    : "deny";
+}
+
 export interface EventEnvelope {
   /** Monotonic per-session sequence — lets a consumer detect gaps / reconnect. */
   seq: number;

@@ -35,6 +35,7 @@ import { Scheduler, DEFAULT_TICK_MS } from "./Scheduler.js";
 import { VercelRouter, type ModelRouter } from "../model/router.js";
 import type { MemoryStore } from "../memory/seam.js";
 import type { ReefEvent } from "../protocol/events.js";
+import { parseApprovalDecision } from "../protocol/events.js";
 import type { ApprovalNotification, Surface } from "../surfaces/index.js";
 import { SqliteMemory } from "../memory/sqlite.js";
 import { builtinTools } from "../tools/builtins.js";
@@ -275,24 +276,24 @@ export class Daemon {
    * approval for the run's suspended turn is decided, re-drives the run (through
    * the same serial inbox) to execute the decided tools and continue.
    */
-  resolveApproval(approvalId: string, decision: string): boolean {
+  resolveApproval(approvalId: string, rawDecision: string): boolean {
+    // The decision arrives over the socket/HTTP wire — whitelist it into the
+    // canonical vocabulary, failing closed (anything unknown → deny) so a garbage
+    // or empty string can never be mistaken for a grant.
+    const decision = parseApprovalDecision(rawDecision);
+    const status: ApprovalStatus = decision === "deny" ? "denied" : "allowed";
+
     // Coding-session approvals resolve into a keystroke injection, not a run resume.
     const coding = this.spine.getCodingApproval(approvalId);
     if (coding) {
       if (coding.status !== "pending") return false;
-      const status: ApprovalStatus = decision === "deny" ? "denied" : "allowed";
       this.spine.resolveCodingApproval(approvalId, status, decision);
       this.sink.emit({
         type: "approval.resolved",
         sessionKey: `coding:${coding.codingSessionId}`,
         runId: "",
         approvalId,
-        decision:
-          decision === "allow-always"
-            ? "allow-always"
-            : decision === "deny"
-              ? "deny"
-              : "allow-once",
+        decision,
       });
       this.coding.resolveCodingApproval(approvalId, decision);
       return true;
@@ -300,15 +301,13 @@ export class Daemon {
 
     const approval = this.spine.getApproval(approvalId);
     if (!approval || approval.status !== "pending") return false;
-    const status: ApprovalStatus = decision === "deny" ? "denied" : "allowed";
     this.spine.resolveApproval(approvalId, status, decision);
     this.sink.emit({
       type: "approval.resolved",
       sessionKey: approval.sessionKey,
       runId: approval.runId,
       approvalId,
-      decision:
-        decision === "allow-always" ? "allow-always" : decision === "deny" ? "deny" : "allow-once",
+      decision,
     });
     if (this.spine.pendingApprovalCount(approval.runId) === 0) {
       void this.inbox.enqueue({ kind: "resume", runId: approval.runId });
