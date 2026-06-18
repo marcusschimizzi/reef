@@ -22,11 +22,20 @@ export interface HttpInterfaceOptions {
   apiKey?: string;
   /**
    * Origins permitted to call the daemon from a browser. A request carrying any
-   * `Origin` header not in this list is rejected — the DNS-rebinding / CSRF
-   * defense for a localhost daemon. Non-browser clients (conch's server-side SSE
-   * pipe, curl) send no Origin and are unaffected. Defaults to none allowed.
+   * `Origin` header not in this list is rejected — part of the DNS-rebinding / CSRF
+   * defense. Non-browser clients (conch's server-side SSE pipe, curl) send no Origin
+   * and are unaffected. Defaults to none allowed.
    */
   allowedOrigins?: string[];
+  /**
+   * Host header values permitted in addition to loopback names. The daemon binds
+   * loopback, so a legitimate client addresses it as `localhost`/`127.0.0.1`/`[::1]`;
+   * a `Host` pointing at any other name means a DNS-rebound attacker domain resolving
+   * to 127.0.0.1 — rejected. This closes the rebinding hole the Origin check misses,
+   * since a same-origin no-cors GET (e.g. EventSource) carries no Origin header. Set
+   * this only when deliberately binding a routable address.
+   */
+  allowedHosts?: string[];
 }
 
 export function startHttpInterface(
@@ -52,9 +61,17 @@ async function handle(
   const path = url.pathname;
   const method = req.method ?? "GET";
 
-  // DNS-rebinding / CSRF defense: a browser always sends Origin on cross-origin
-  // (and same-origin non-GET) requests; reject any Origin we didn't allow. Clients
-  // that send no Origin (server-side fetch, curl) are unaffected.
+  // DNS-rebinding defense: the daemon binds loopback, so a legitimate caller's Host
+  // is a loopback name. A Host pointing elsewhere is an attacker domain rebound to
+  // 127.0.0.1. This also covers the case the Origin check below misses — a same-origin
+  // no-cors GET (EventSource/simple fetch) carries no Origin header.
+  if (!isAllowedHost(req.headers.host, opts.allowedHosts)) {
+    return sendJson(res, 403, { ok: false, error: "forbidden host" });
+  }
+
+  // CSRF defense: a browser always sends Origin on cross-origin (and same-origin
+  // non-GET) requests; reject any Origin we didn't allow. Clients that send no Origin
+  // (server-side fetch, curl) are unaffected.
   const origin = req.headers.origin;
   if (origin !== undefined && !(typeof origin === "string" && (opts.allowedOrigins ?? []).includes(origin))) {
     return sendJson(res, 403, { ok: false, error: "forbidden origin" });
@@ -179,6 +196,26 @@ function streamEvents(
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+
+/** Strip a trailing `:port` from a Host header, preserving an IPv6 `[..]` literal. */
+function hostnameOf(hostHeader: string): string {
+  if (hostHeader.startsWith("[")) {
+    const close = hostHeader.indexOf("]");
+    return close >= 0 ? hostHeader.slice(0, close + 1) : hostHeader;
+  }
+  const colon = hostHeader.lastIndexOf(":");
+  return colon >= 0 ? hostHeader.slice(0, colon) : hostHeader;
+}
+
+function isAllowedHost(hostHeader: string | undefined, extra: string[] = []): boolean {
+  // No Host header at all (HTTP/1.0, some tools) — not a browser rebinding vector.
+  if (hostHeader === undefined) return true;
+  const name = hostnameOf(hostHeader).toLowerCase();
+  if (LOOPBACK_HOSTS.has(name)) return true;
+  return extra.some((h) => h.toLowerCase() === name || h.toLowerCase() === hostHeader.toLowerCase());
+}
+
 function authorized(req: http.IncomingMessage, apiKey: string): boolean {
   const auth = req.headers.authorization;
   return auth === `Bearer ${apiKey}`;
