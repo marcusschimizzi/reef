@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { z } from "zod";
+import { safeChildEnv } from "../core/env.js";
 import type { Tool } from "./types.js";
 
 // The shell tool — reef's escape hatch to the wider machine. Unlike the file
@@ -32,7 +33,14 @@ function runCommand(
   signal?: AbortSignal,
 ): Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
   return new Promise((resolve, reject) => {
-    const child = spawn("bash", ["-c", command], { cwd, signal });
+    // Curated env only — never hand the daemon's API keys/tokens to an arbitrary
+    // command. --norc/--noprofile keep execution deterministic and independent of the
+    // user's interactive dotfiles (which can differ by how the daemon was launched).
+    const child = spawn("bash", ["--norc", "--noprofile", "-c", command], {
+      cwd,
+      signal,
+      env: safeChildEnv(),
+    });
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => child.kill("SIGKILL"), TIMEOUT_MS);
