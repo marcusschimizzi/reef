@@ -8,10 +8,11 @@ import type { AgentRecord } from "../../src/core/types.js";
 import type { ReefEvent } from "../../src/protocol/events.js";
 
 // Live end-to-end: the real provider-routing layer → Anthropic → a real tool
-// round-trip through the loop. Skips automatically when ANTHROPIC_API_KEY is
-// absent, so the suite stays green without a key.
+// round-trip through the loop. Double-gated so it NEVER spends credits implicitly:
+// vitest.config excludes tests/live from the default `npm test`, and this file also
+// requires an explicit REEF_LIVE_TESTS=1 (set by `npm run test:live`) plus a key.
 loadEnv();
-const hasKey = !!process.env.ANTHROPIC_API_KEY;
+const runLive = !!process.env.ANTHROPIC_API_KEY && process.env.REEF_LIVE_TESTS === "1";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -27,7 +28,7 @@ const agent: AgentRecord = {
   toolAllowlist: ["echo", "get_time"],
 };
 
-describe.skipIf(!hasKey)("live smoke (real model)", () => {
+describe.skipIf(!runLive)("live smoke (real model)", () => {
   it("completes a get_time tool round-trip through the real router", async () => {
     const dir = mkdtempSync(join(tmpdir(), "reef-live-"));
     dirs.push(dir);

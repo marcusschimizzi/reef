@@ -16,7 +16,8 @@
     "tui": "tsx src/client/cli.tsx",
     "config": "tsx src/client/config.ts",
     "setup": "tsx src/client/setup.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:live": "REEF_LIVE_TESTS=1 vitest run tests/live"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.81",

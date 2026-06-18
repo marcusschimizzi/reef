@@ -12,6 +12,7 @@ import { join, resolve } from "node:path";
 import { existsSync, mkdirSync, rmSync, writeFileSync, watchFile, unwatchFile } from "node:fs";
 import type { Spine } from "../db/spine.js";
 import type { EmitFn } from "../protocol/events.js";
+import { parseApprovalDecision } from "../protocol/events.js";
 import { newActionId, newApprovalId } from "../core/ids.js";
 import { nowIso } from "../core/time.js";
 import type { RunSource } from "../core/types.js";
@@ -448,18 +449,20 @@ export class CodingSessionManager {
    *  by the daemon's resolveApproval fork (Task 10) — and directly in tests. The
    *  daemon also flips the row first; the pending guard makes the double-write a
    *  harmless no-op. */
-  resolveCodingApproval(approvalId: string, decision: string): void {
+  resolveCodingApproval(approvalId: string, rawDecision: string): void {
     const appr = this.deps.spine.getCodingApproval(approvalId);
     if (!appr || appr.status !== "pending") return;
+    // Whitelist the decision (defense-in-depth: the daemon already normalizes, but a
+    // direct caller must not be able to turn garbage into an injected "Yes"). Anything
+    // outside the canonical vocabulary → deny.
+    const decision: Decision = parseApprovalDecision(rawDecision);
     this.deps.spine.resolveCodingApproval(approvalId, decision === "deny" ? "denied" : "allowed", decision);
     const id = appr.codingSessionId;
     const cs = this.deps.spine.getCodingSession(id);
-    const dec: Decision =
-      decision === "deny" ? "deny" : decision === "allow-always" ? "allow-always" : "allow-once";
     this.injectAnswer(
       id,
       appr.options,
-      dec,
+      decision,
       { toolName: appr.toolName, input: appr.input, sessionKey: `coding:${id}` },
       decision === "deny" ? "deny" : "allow",
       cs?.spawningRunId,

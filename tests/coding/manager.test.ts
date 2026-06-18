@@ -194,6 +194,18 @@ describe("CodingSessionManager", () => {
     expect(spine.getCodingSession(id)!.status).toBe("running");
   });
 
+  it("resolveCodingApproval fails closed on a non-canonical decision (injects No, denies)", () => {
+    const { spine, events, driver, mgr } = setup();
+    mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+    driver.handle.feed("Do you want to edit a.ts?\n❯ 1. Yes\n  2. No\n");
+    const req = events.find((e) => e.type === "approval.requested") as { approvalId: string };
+    mgr.resolveCodingApproval(req.approvalId, "garbage");
+    // a garbage decision must NOT inject Yes (option 1) and must record a denial
+    expect(driver.handle.written).toContain("2\r");
+    expect(driver.handle.written).not.toContain("1\r");
+    expect(spine.getCodingApproval(req.approvalId)!.status).toBe("denied");
+  });
+
   it("on completion, stores the transcript's final assistant text as result", () => {
     const { spine, driver, mgr, dir } = setup(new FakePolicy(() => ({ action: "allow" })));
     const root = join(dir, "claude-projects");
