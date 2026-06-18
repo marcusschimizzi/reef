@@ -41,6 +41,22 @@ describe("EventSink persistence policy (RF-04)", () => {
     spine.close();
   });
 
+  it("keeps the persisted seq sequence gap-free (broadcast-only events don't consume seq)", () => {
+    const spine = newSpine();
+    const sink = new EventSink(spine);
+    const sk = "coding:cs_2";
+    sink.emit({ type: "coding.session.started", sessionKey: sk, runId: "", codingSessionId: "cs_2", agentKind: "claude", directory: "/tmp" });
+    for (let i = 0; i < 50; i++) {
+      sink.emit({ type: "coding.output", sessionKey: sk, runId: "", codingSessionId: "cs_2", text: `frame ${i}` });
+    }
+    sink.emit({ type: "coding.session.completed", sessionKey: sk, runId: "", codingSessionId: "cs_2", result: "done" });
+
+    // the durable stream must be contiguous (1,2) — NOT 1,52 with a 50-wide hole,
+    // or a gap-detecting consumer thinks it missed events on reconnect.
+    expect(spine.getEventsSince(sk, 0).map((e) => e.seq)).toEqual([1, 2]);
+    spine.close();
+  });
+
   it("still persists ordinary lifecycle events", () => {
     const spine = newSpine();
     const sink = new EventSink(spine);

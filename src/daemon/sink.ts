@@ -24,9 +24,13 @@ export class EventSink {
   constructor(private readonly spine: Spine) {}
 
   emit: EmitFn = (init: ReefEventInit): void => {
-    const seq = this.nextSeq(init.sessionKey);
+    // Broadcast-only events are NOT persisted, so they must not consume a seq from
+    // the persisted sequence — otherwise history has phantom gaps and a gap-detecting
+    // consumer thinks it dropped events. They ride the current (last persisted) seq.
+    const broadcastOnly = BROADCAST_ONLY.has(init.type);
+    const seq = broadcastOnly ? this.currentSeq(init.sessionKey) : this.nextSeq(init.sessionKey);
     const event = { ...init, seq, ts: nowMs() } as ReefEvent;
-    if (!BROADCAST_ONLY.has(event.type)) this.spine.appendEvent(event);
+    if (!broadcastOnly) this.spine.appendEvent(event);
     for (const fn of this.subscribers) {
       try {
         fn(event);
@@ -42,10 +46,13 @@ export class EventSink {
   }
 
   private nextSeq(sessionKey: string): number {
-    const current =
-      this.seqBySession.get(sessionKey) ?? this.spine.maxEventSeq(sessionKey);
-    const next = current + 1;
+    const next = this.currentSeq(sessionKey) + 1;
     this.seqBySession.set(sessionKey, next);
     return next;
+  }
+
+  /** The last assigned seq for a session, without consuming a new one. */
+  private currentSeq(sessionKey: string): number {
+    return this.seqBySession.get(sessionKey) ?? this.spine.maxEventSeq(sessionKey);
   }
 }
