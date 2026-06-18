@@ -50,8 +50,12 @@ export class PtyClaudeDriver implements CodingAgentDriver {
           // node-pty setsid's the child, so its pid leads the process group: SIGTERM→
           // SIGKILL the GROUP to reap claude AND its grandchildren (MCP servers, Bash
           // tool subprocesses) instead of orphaning them. proc.kill() also tears down
-          // the PTY master fd.
-          if (proc.pid) killProcessGroup(proc.pid);
+          // the PTY master fd. When the PTY exits, cancel the pending force-kill so we
+          // never re-signal a freed (possibly reused) process group.
+          if (proc.pid) {
+            const cancel = killProcessGroup(proc.pid);
+            proc.onExit(() => cancel());
+          }
           proc.kill();
         } catch { /* already dead */ }
       },

@@ -356,6 +356,8 @@ describe("Daemon coding-session control", () => {
 
     // the orphaned session is marked process_lost (not left running forever)
     expect(d2.spine.getCodingSession(cs.id)!.status).toBe("process_lost");
+    // process_lost is lifecycle-ended → ended_at is stamped (consistency with terminal states)
+    expect(d2.spine.getCodingSession(cs.id)!.endedAt).toBeTruthy();
     // and the stranded awaiting_subwork run is resumed to completion (not hung)
     expect(d2.spine.getRun(run.id)!.status).toBe("completed");
     // the agent received an isError tool_result for the interrupted subwork

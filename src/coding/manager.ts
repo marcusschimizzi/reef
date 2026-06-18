@@ -335,7 +335,10 @@ export class CodingSessionManager {
    *  diagnostic and resumes the spawning run, instead of hanging awaiting_subwork. */
   private onStartupTimeout(id: string): void {
     const l = this.live.get(id);
-    if (!l || l.sawOutput || l.handedBack) return;
+    // disarmIdle (called on every teardown path) already clears this timer before
+    // cancelling/handingBack are set, so this is belt-and-suspenders: never kill a
+    // session that's already producing output, handed back, cancelling, or torn down.
+    if (!l || l.sawOutput || l.handedBack || this.cancelling.has(id) || this.handingBack.has(id)) return;
     l.startupTimer = undefined;
     l.trace.write({ type: "lifecycle", event: "startup-timeout" });
     l.handle.kill();

@@ -46,7 +46,8 @@ function runCommand(
     });
     let stdout = "";
     let stderr = "";
-    const killGroup = (): void => { if (child.pid) killProcessGroup(child.pid); };
+    let cancelKill: (() => void) | undefined;
+    const killGroup = (): void => { if (child.pid) cancelKill = killProcessGroup(child.pid); };
     const timer = setTimeout(killGroup, TIMEOUT_MS);
     const onAbort = (): void => killGroup();
     if (signal) {
@@ -56,6 +57,9 @@ function runCommand(
     const cleanup = (): void => {
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
+      // The child exited (close/error) — cancel any pending force-kill so we don't
+      // re-signal the (now-freed, possibly reused) process group.
+      cancelKill?.();
     };
 
     child.stdout.on("data", (d: Buffer) => {

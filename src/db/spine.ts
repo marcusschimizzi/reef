@@ -810,7 +810,10 @@ export class Spine {
   }
 
   setCodingSessionStatus(id: string, status: string, result?: string): void {
-    const terminal = status === "completed" || status === "failed" || status === "cancelled";
+    // `process_lost` is lifecycle-ended (the PTY died) → stamp ended_at like the other
+    // terminal states. (`paused` is deliberately excluded — it's resumable, not ended.)
+    const terminal =
+      status === "completed" || status === "failed" || status === "cancelled" || status === "process_lost";
     this.db
       .prepare(
         `UPDATE coding_sessions

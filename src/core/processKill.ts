@@ -14,7 +14,7 @@ export interface KillProcessGroupOpts {
   kill?: (target: number, signal: NodeJS.Signals) => void;
 }
 
-export function killProcessGroup(pid: number, opts: KillProcessGroupOpts = {}): void {
+export function killProcessGroup(pid: number, opts: KillProcessGroupOpts = {}): () => void {
   const kill =
     opts.kill ??
     ((target, signal) => {
@@ -30,4 +30,8 @@ export function killProcessGroup(pid: number, opts: KillProcessGroupOpts = {}): 
   const timer = setTimeout(() => kill(-pid, "SIGKILL"), opts.graceMs ?? 2000);
   // A teardown backstop must not keep the daemon's event loop alive on its own.
   (timer as { unref?: () => void }).unref?.();
+  // Disposer: once a caller KNOWS the child exited (its own exit event fired), it
+  // cancels this force-kill — so we never re-signal `-pid` after our group is gone
+  // (which a reused pgid could otherwise inherit).
+  return () => clearTimeout(timer);
 }
