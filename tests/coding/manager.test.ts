@@ -36,7 +36,7 @@ class FakeDriver implements CodingAgentDriver {
   start(opts: StartOpts): CodingDriverHandle { this.lastOpts = opts; return this.handle; }
 }
 
-function setup(policy: ApprovalPolicy = new FakePolicy(() => ({ action: "gate" })), idleMs?: number, startupMs?: number) {
+function setup(policy: ApprovalPolicy = new FakePolicy(() => ({ action: "gate" })), idleMs?: number, startupMs?: number, proactiveApprovalTimeoutMs?: number) {
   const dir = tmp();
   const spine = new Spine(join(dir, "reef.db"));
   const events: ReefEvent[] = [];
@@ -53,7 +53,7 @@ function setup(policy: ApprovalPolicy = new FakePolicy(() => ({ action: "gate" }
     return () => { triggerStopHook = undefined; disposed = true; };
   };
   const mgr = new CodingSessionManager({
-    spine, emit, driver, traceDir: join(dir, "traces"), policy, idleMs, startupMs, watchHandbackFile,
+    spine, emit, driver, traceDir: join(dir, "traces"), policy, idleMs, startupMs, proactiveApprovalTimeoutMs, watchHandbackFile,
   });
   return {
     spine, events, driver, mgr, dir,
@@ -253,6 +253,26 @@ describe("CodingSessionManager", () => {
       expect(spine.getCodingSession(id)!.status).toBe("paused");
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it("arms an auto-deny expiry on a gated PROACTIVE coding prompt, not an interactive one (finding #1)", () => {
+    // interactive session: a gated prompt waits for the human — no auto-deny deadline.
+    {
+      const { spine, events, mgr, driver } = setup(new FakePolicy(() => ({ action: "gate" })), undefined, undefined, 60_000);
+      mgr.start({ agentKind: "claude-code", directory: "/tmp/i", task: "t" });
+      driver.handle.feed("Do you want to edit a.ts?\n❯ 1. Yes\n  2. No\n");
+      const appr = (events.find((e) => e.type === "approval.requested") as { approvalId: string }).approvalId;
+      expect(spine.getCodingApproval(appr)!.expiresAt).toBeUndefined();
+    }
+    // proactive session (spawned by a trigger run): a gated prompt has no human to
+    // answer inline, so it gets an auto-deny deadline the scheduler sweep enforces.
+    {
+      const { spine, events, mgr, driver } = setup(new FakePolicy(() => ({ action: "gate" })), undefined, undefined, 60_000);
+      mgr.start({ agentKind: "claude-code", directory: "/tmp/p", task: "t", source: { kind: "trigger", triggerId: "t1", triggerType: "schedule" } });
+      driver.handle.feed("Do you want to edit b.ts?\n❯ 1. Yes\n  2. No\n");
+      const appr = (events.find((e) => e.type === "approval.requested") as { approvalId: string }).approvalId;
+      expect(spine.getCodingApproval(appr)!.expiresAt).toBeTruthy();
     }
   });
 

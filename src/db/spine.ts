@@ -62,6 +62,8 @@ export interface CodingApprovalRecord {
   decision?: string;
   createdAt: string;
   decidedAt?: string;
+  /** Auto-deny deadline for a routed proactive coding approval (no inline human). */
+  expiresAt?: string;
 }
 
 // ── row shapes (as stored) ──────────────────────────────────────────────────
@@ -875,6 +877,23 @@ export class Spine {
       )
       .run(status, decision, nowIso(), id);
   }
+
+  /** Arm the auto-deny deadline on a routed proactive coding approval (no human to
+   *  answer it inline — the scheduler sweep denies it past this instant). */
+  setCodingApprovalExpiry(id: string, expiresAt: string): void {
+    this.db.prepare(`UPDATE coding_approvals SET expires_at = ? WHERE id = ?`).run(expiresAt, id);
+  }
+
+  /** Pending coding approvals whose auto-deny deadline has passed. */
+  getExpiredCodingApprovals(nowIso: string): CodingApprovalRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM coding_approvals
+         WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ?`,
+      )
+      .all(nowIso) as Record<string, unknown>[];
+    return rows.map(rowToCodingApproval);
+  }
 }
 
 /** Map a session's latest run to its list-view status. */
@@ -1021,5 +1040,6 @@ function rowToCodingApproval(row: Record<string, unknown>): CodingApprovalRecord
     decision: (row.decision as string | null) ?? undefined,
     createdAt: row.created_at as string,
     decidedAt: (row.decided_at as string | null) ?? undefined,
+    expiresAt: (row.expires_at as string | null) ?? undefined,
   };
 }

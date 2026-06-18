@@ -43,6 +43,10 @@ export interface CodingSessionManagerDeps {
    *  window it's treated as a failed start (stuck auth, hung spawn) and killed —
    *  the idle timer only arms on output, so a zero-output hang needs this guard. */
   startupMs?: number;
+  /** Auto-deny deadline (ms) armed on a gated prompt in a PROACTIVE session — there's
+   *  no human to answer it inline, so the scheduler sweep denies it past this window
+   *  (prevents a routed proactive coding gate from deadlocking the session + its run). */
+  proactiveApprovalTimeoutMs?: number;
   /** Watch a handback sentinel file for creation; returns a disposer. Injected in
    *  tests to trigger the signal deterministically. Defaults to an fs watcher. */
   watchHandbackFile?: (file: string, onSignal: () => void) => () => void;
@@ -92,9 +96,11 @@ export class CodingSessionManager {
    *  prematurely kill an active session. Bad env → NaN → falsy → default. */
   private readonly idleMs: number;
   private readonly startupMs: number;
+  private readonly proactiveApprovalTimeoutMs: number;
   constructor(private readonly deps: CodingSessionManagerDeps) {
     this.idleMs = deps.idleMs ?? (Number(process.env.REEF_CODING_IDLE_MS) || 300_000);
     this.startupMs = deps.startupMs ?? (Number(process.env.REEF_CODING_STARTUP_MS) || 60_000);
+    this.proactiveApprovalTimeoutMs = deps.proactiveApprovalTimeoutMs ?? 3_600_000;
   }
 
   start(opts: StartCodingSession): string {
@@ -464,7 +470,7 @@ export class CodingSessionManager {
   private gate(
     id: string,
     ev: { promptText: string; options: { index: number; label: string }[] },
-    ctx: { toolName: string; input: unknown },
+    ctx: { toolName: string; input: unknown; source: RunSource },
   ): void {
     const approvalId = newApprovalId();
     this.deps.spine.createCodingApproval({
@@ -475,6 +481,15 @@ export class CodingSessionManager {
       toolName: ctx.toolName,
       input: ctx.input,
     });
+    // A proactive (trigger/heartbeat) session has no human to answer this prompt
+    // inline — arm an auto-deny deadline the scheduler sweep enforces, so a routed
+    // proactive coding gate can't deadlock the session and its spawning run forever.
+    if (ctx.source.kind === "trigger") {
+      this.deps.spine.setCodingApprovalExpiry(
+        approvalId,
+        new Date(Date.now() + this.proactiveApprovalTimeoutMs).toISOString(),
+      );
+    }
     this.deps.emit({
       type: "approval.requested",
       approvalId,

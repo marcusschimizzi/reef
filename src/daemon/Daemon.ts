@@ -192,6 +192,7 @@ export class Daemon {
       driver: opts.codingDriver ?? new PtyClaudeDriver(),
       traceDir: opts.codingTraceDir ?? join(opts.workspaceDir, "..", "coding-sessions"),
       policy: this.policy,
+      proactiveApprovalTimeoutMs: this.approvalTimeoutMs,
       watchHandbackFile: opts.codingWatchHandbackFile,
     });
     // Watch our own event stream to route proactive approval requests out to
@@ -251,6 +252,11 @@ export class Daemon {
     for (const approval of this.spine.getExpiredApprovals(now.toISOString())) {
       this.resolveApproval(approval.id, "deny");
     }
+    // Coding-session approvals from a proactive run have no human attached either;
+    // sweep them through the same resolve path (which forks to inject "No").
+    for (const coding of this.spine.getExpiredCodingApprovals(now.toISOString())) {
+      this.resolveApproval(coding.id, "deny");
+    }
   }
 
   /** The scheduler's periodic work: fire due triggers, then expire stale approvals. */
@@ -298,7 +304,6 @@ export class Daemon {
     const coding = this.spine.getCodingApproval(approvalId);
     if (coding) {
       if (coding.status !== "pending") return false;
-      this.spine.resolveCodingApproval(approvalId, status, decision);
       this.sink.emit({
         type: "approval.resolved",
         sessionKey: `coding:${coding.codingSessionId}`,
@@ -306,6 +311,10 @@ export class Daemon {
         approvalId,
         decision,
       });
+      // The manager owns coding-approval resolution: it flips the durable row AND
+      // injects the answer keystroke. (Do NOT flip the row here first — that would
+      // make the manager's pending-guard early-return and skip the injection, leaving
+      // the PTY stuck at its prompt.)
       this.coding.resolveCodingApproval(approvalId, decision);
       return true;
     }

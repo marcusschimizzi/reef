@@ -309,6 +309,39 @@ describe("Daemon coding-session control", () => {
     daemon.close();
   });
 
+  it("sweepExpiredApprovals auto-denies an expired pending coding approval (route-mode backstop, finding #1)", () => {
+    const dir = tmp();
+    const driver = new FakeDriver();
+    const d = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      codingTraceDir: join(dir, "traces"),
+      codingWatchHandbackFile: (_f, _on) => () => {},
+      router: new NullRouter(),
+      codingDriver: driver,
+    });
+    const id = d.startCodingSession({ agentKind: "claude-code", directory: tmp(), task: "t" }); // live session
+    // A proactive coding gate armed an expiry earlier; the deadline has now passed and
+    // no human answered. (Simulated directly — the arming path is covered separately.)
+    d.spine.createCodingApproval({
+      id: "ca_1",
+      codingSessionId: id,
+      promptText: "Do you want to edit a.ts?",
+      options: [{ index: 1, label: "Yes" }, { index: 2, label: "No" }],
+      toolName: "claude-code:Write",
+      input: {},
+    });
+    d.spine.setCodingApprovalExpiry("ca_1", new Date(Date.now() - 1000).toISOString());
+    expect(d.spine.getCodingApproval("ca_1")!.status).toBe("pending");
+
+    d.sweepExpiredApprovals(new Date());
+
+    // auto-denied (no permanent deadlock) and the manager injected "No" into the live PTY
+    expect(d.spine.getCodingApproval("ca_1")!.status).toBe("denied");
+    expect(driver.handle.written).toContain("2\r");
+    d.close();
+  });
+
   it("send_feedback refuses to revive a coding session this agent did not start (finding #4 scoping)", async () => {
     const dir = tmp();
     const driver = new FakeDriver();
