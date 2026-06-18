@@ -309,6 +309,61 @@ describe("Daemon coding-session control", () => {
     daemon.close();
   });
 
+  it("recovers a coding session orphaned by a daemon restart: marks it process_lost and resumes the stranded run", async () => {
+    const dir = tmp();
+    const workDir = tmp();
+    const noopWatch = (_f: string, _on: () => void) => () => {};
+
+    // ── daemon 1 reaches awaiting_subwork with a running coding session ──
+    const d1 = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      codingTraceDir: join(dir, "traces"),
+      codingWatchHandbackFile: noopWatch,
+      router: new FakeRouter([
+        { stop: "tool_use", content: [{ type: "tool_use", id: "tool_1", name: "start_coding_session", input: { directory: workDir, task: "go" } }], usage: { inputTokens: 5, outputTokens: 2 } },
+      ]),
+      policy: new AllowPolicy(),
+      codingDriver: new FakeDriver(),
+    });
+    d1.registerAgent(agent);
+    await d1.submit({ sessionKey: "s1", agentId: "reef", message: "do the work" });
+    const run = d1.listRuns({}).find((r) => r.sessionKey === "s1")!;
+    expect(run.stopReason).toBe("awaiting_subwork");
+    const cs = d1.spine.findCodingSessionBySubwork(run.id, "tool_1")!;
+    expect(cs.status).toBe("running");
+
+    // ── simulate a CRASH: drop the db connection without a clean shutdown, so the
+    //    coding session stays `running` (close() would mark it cancelled) ──
+    d1.spine.close();
+
+    // ── daemon 2 on the same db has an empty live map → recover() must reconcile ──
+    const d2 = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      codingTraceDir: join(dir, "traces"),
+      codingWatchHandbackFile: noopWatch,
+      // one turn: after the lost subwork is committed as an error result, the run finishes.
+      router: new FakeRouter([
+        { stop: "completed", content: [{ type: "text", text: "the coding session was lost; reporting back" }], usage: { inputTokens: 4, outputTokens: 2 } },
+      ]),
+      policy: new AllowPolicy(),
+      codingDriver: new FakeDriver(),
+    });
+    d2.registerAgent(agent);
+
+    await d2.recover();
+
+    // the orphaned session is marked process_lost (not left running forever)
+    expect(d2.spine.getCodingSession(cs.id)!.status).toBe("process_lost");
+    // and the stranded awaiting_subwork run is resumed to completion (not hung)
+    expect(d2.spine.getRun(run.id)!.status).toBe("completed");
+    // the agent received an isError tool_result for the interrupted subwork
+    const toolMsg = d2.spine.getMessages("s1").find((m) => m.role === "tool");
+    expect(toolMsg?.content[0]).toMatchObject({ isError: true });
+    d2.close();
+  });
+
   it("cancel propagates to a coding session spawned by a suspended run", async () => {
     const { daemon, driver } = setup();
 

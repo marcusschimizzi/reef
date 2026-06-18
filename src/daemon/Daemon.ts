@@ -100,6 +100,17 @@ interface Wake {
 // drops such fires; `fire_once` runs them anyway.
 const MISSED_GRACE_MS = 90_000;
 
+// Coding-session statuses that are terminal from the spawning run's point of view:
+// the run can collect a result and continue. `paused` = handed back (resumable);
+// `process_lost` = the PTY died (crash) — a resumable failure. The non-terminal ones
+// (running, awaiting_decision) mean the increment is still in flight.
+const TERMINAL_CODING_STATUSES: ReadonlySet<string> = new Set([
+  "completed",
+  "failed",
+  "paused",
+  "process_lost",
+]);
+
 // Everything the agent might wake for funnels into one serial inbox: a user
 // message, a resume after an approval resolved, or a trigger firing (reef-docs/05
 // — one queue, the "dispatch as shape" seam Phase 4 cashes in).
@@ -321,9 +332,37 @@ export class Daemon {
    * returned here — they resume only when their approvals resolve.
    */
   async recover(): Promise<void> {
+    // A coding session left non-terminal by a crash has a dead PTY (its child process
+    // died with the daemon) but its row still says running, and its spawning run is
+    // parked `awaiting_subwork` — which getInterruptedRuns does NOT return, so it would
+    // hang forever. Reconcile those first: mark the session process_lost and resume the
+    // stranded run so it collects an (error) result and continues.
+    for (const runId of this.recoverCodingSessions()) {
+      await this.resumeRun(runId);
+    }
     for (const run of this.spine.getInterruptedRuns()) {
       await this.runLoop(run);
     }
+  }
+
+  /** Mark coding sessions orphaned by a crash as `process_lost` (the daemon just
+   *  started, so nothing is live — any still-running row is dead). Returns the
+   *  spawning run ids parked `awaiting_subwork` that need resuming. */
+  private recoverCodingSessions(): string[] {
+    const toResume: string[] = [];
+    for (const cs of this.spine.listCodingSessions()) {
+      if (cs.status !== "running" && cs.status !== "awaiting_decision") continue;
+      const diag =
+        `The coding session (${cs.id}) was interrupted by a daemon restart — its process did not ` +
+        `survive (status before the restart: ${cs.status}). It can be revived from where it left off ` +
+        `with send_feedback("${cs.id}", "<how to continue>").`;
+      this.spine.setCodingSessionStatus(cs.id, "process_lost", diag);
+      if (cs.spawningRunId) {
+        const run = this.spine.getRun(cs.spawningRunId);
+        if (run?.status === "suspended") toResume.push(cs.spawningRunId);
+      }
+    }
+    return toResume;
   }
 
   /** Cancel the in-flight run for a session (reef-docs/03 cancellation). Also
@@ -747,12 +786,13 @@ export class Daemon {
           },
           collectSubwork: (runId, toolUseId) => {
             const cs = this.spine.findCodingSessionBySubwork(runId, toolUseId);
-            // `paused` = handed back (increment done, resumable); a completable
-            // result for the manager run, like completed/failed.
-            if (!cs || (cs.status !== "completed" && cs.status !== "failed" && cs.status !== "paused")) return undefined;
+            // `paused` = handed back (increment done, resumable); `process_lost` = the
+            // PTY died (crash recovery) — both are completable results for the manager
+            // run, like completed/failed. process_lost is failed-shaped (isError).
+            if (!cs || !TERMINAL_CODING_STATUSES.has(cs.status)) return undefined;
             return {
               result: cs.result ?? `coding session ${cs.id} ${cs.status}`,
-              failed: cs.status === "failed",
+              failed: cs.status === "failed" || cs.status === "process_lost",
               sessionId: cs.id,
               status: cs.status,
             };

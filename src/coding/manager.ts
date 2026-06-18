@@ -134,7 +134,9 @@ export class CodingSessionManager {
    *  tool_result via the loop's subwork-failure path). */
   resume(sessionId: string, text: string, opts: { spawningRunId?: string | null; spawningToolUseId?: string | null } = {}): void {
     const cs = this.deps.spine.getCodingSession(sessionId);
-    if (!cs || cs.status !== "paused") {
+    // `paused` = handed back; `process_lost` = interrupted by a crash. Both are
+    // revivable via `claude --resume <uuid>` (the session JSONL survives on disk).
+    if (!cs || (cs.status !== "paused" && cs.status !== "process_lost")) {
       throw new Error(`coding session ${sessionId} is not resumable (status: ${cs?.status ?? "not found"})`);
     }
     this.deps.spine.relinkCodingSessionSubwork(sessionId, opts.spawningRunId ?? null, opts.spawningToolUseId ?? null);
