@@ -24,9 +24,20 @@ export class Scheduler {
     this.timer = setInterval(() => {
       if (this.ticking) return; // a previous tick is still running — skip, don't overlap
       this.ticking = true;
-      void Promise.resolve(this.onTick()).finally(() => {
-        this.ticking = false;
-      });
+      // Invoke onTick INSIDE the async body so a SYNCHRONOUS throw is caught too (else
+      // it escapes the callback with ticking=true → every future tick wedges). The
+      // catch also keeps a rejecting tick from becoming an unhandledRejection; finally
+      // always clears the guard so the cadence survives any tick error.
+      void (async () => {
+        try {
+          await this.onTick();
+        } catch {
+          // Tick error swallowed here (no wedge, no unhandledRejection); tick-level
+          // error observability is the tick handler's own concern.
+        } finally {
+          this.ticking = false;
+        }
+      })();
     }, this.intervalMs);
     // Don't keep the process alive solely for the scheduler.
     this.timer.unref?.();

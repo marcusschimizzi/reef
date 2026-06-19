@@ -15,10 +15,17 @@ describe("wrapUntrusted (RF-22 — untrusted-content envelope)", () => {
     const w = wrapUntrusted(attack, "memory");
     // exactly one real closing delimiter — the wrapper's own; the forged one is defanged
     expect((w.match(/<\/untrusted-content>/g) ?? []).length).toBe(1);
-    expect(w).toContain("‹/untrusted-content"); // the attacker's tag, defanged
+    expect(w).toContain("‹untrusted-content"); // the attacker's tag, defanged
   });
 
   it("sanitizeForPrompt defangs both open and close delimiters, case-insensitively", () => {
     expect(sanitizeForPrompt("<untrusted-content>x</UNTRUSTED-CONTENT>")).not.toMatch(/<\/?untrusted-content/i);
+  });
+
+  it("defangs whitespace-separated tag variants (a filename with a spaced close tag can't break out)", () => {
+    for (const variant of ["< untrusted-content>", "<\tuntrusted-content>", "</ untrusted-content>", "<  /  untrusted-content>"]) {
+      const out = sanitizeForPrompt(variant);
+      expect(out, variant).not.toMatch(/<\s*\/?\s*untrusted-content/i);
+    }
   });
 });

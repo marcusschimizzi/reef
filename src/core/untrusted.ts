@@ -14,7 +14,11 @@ const TAG = "untrusted-content";
  * `untrusted-content` tag with a look-alike (‹), case-insensitively.
  */
 export function sanitizeForPrompt(text: string): string {
-  return text.replace(/<(\/?)untrusted-content/gi, "‹$1untrusted-content");
+  // Match the tag even with whitespace around the slash/name (`< untrusted-content`,
+  // `</ untrusted-content`, tabs/newlines) — a filename or scraped line can use those
+  // and an LLM may still read them as a terminator. Collapse any variant to a defanged,
+  // non-tag token.
+  return text.replace(/<\s*\/?\s*untrusted-content/gi, "‹untrusted-content");
 }
 
 /**
