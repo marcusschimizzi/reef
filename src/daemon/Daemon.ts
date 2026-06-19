@@ -36,6 +36,7 @@ import { VercelRouter, type ModelRouter } from "../model/router.js";
 import type { MemoryStore } from "../memory/seam.js";
 import type { ReefEvent } from "../protocol/events.js";
 import { parseApprovalDecision } from "../protocol/events.js";
+import { wrapUntrusted } from "../core/untrusted.js";
 import type { ApprovalNotification, Surface } from "../surfaces/index.js";
 import { SqliteMemory } from "../memory/sqlite.js";
 import { builtinTools } from "../tools/builtins.js";
@@ -709,8 +710,10 @@ export class Daemon {
       trigger.agentId,
       this.spine.getAgent(trigger.agentId)?.model,
     );
+    // The file path is filesystem-controlled (an attacker can name a file with
+    // injection text), so the change description crosses the trust boundary — wrap it.
     const text = event
-      ? `${trigger.input}\n\n(file event: ${event.type} at ${event.path})`
+      ? `${trigger.input}\n\n${wrapUntrusted(`file event: ${event.type} at ${event.path}`, "file-watch")}`
       : trigger.input;
     this.spine.appendMessage(trigger.sessionKey, "user", [{ type: "text", text }]);
     const source: RunSource = {
@@ -833,7 +836,10 @@ export class Daemon {
             // run, like completed/failed. process_lost is failed-shaped (isError).
             if (!cs || !TERMINAL_CODING_STATUSES.has(cs.status)) return undefined;
             return {
-              result: cs.result ?? `coding session ${cs.id} ${cs.status}`,
+              // The increment summary is a supervised sub-agent's output (scraped from
+              // the repo it read) re-entering this tool-holding parent run — wrap it so
+              // the parent treats it as data, not instructions (RF-22, sharpest case).
+              result: wrapUntrusted(cs.result ?? `coding session ${cs.id} ${cs.status}`, "coding-session"),
               failed: cs.status === "failed" || cs.status === "process_lost",
               sessionId: cs.id,
               status: cs.status,

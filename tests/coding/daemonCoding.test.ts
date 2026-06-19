@@ -246,6 +246,9 @@ describe("Daemon coding-session control", () => {
 
     expect(daemon.spine.getRun(run!.id)!.status).toBe("completed");
     expect(daemon.spine.getCodingSession(cs!.id)!.status).toBe("completed");
+    // the sub-agent's result re-enters the parent wrapped as untrusted content (RF-22)
+    const toolMsg = daemon.spine.getMessages("s1").find((m) => m.role === "tool");
+    expect(JSON.stringify(toolMsg?.content[0])).toContain('untrusted-content source=\\"coding-session\\"');
     daemon.close();
   });
 
