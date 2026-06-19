@@ -222,6 +222,47 @@ describe("Daemon", () => {
     daemon.close();
   });
 
+  it("repairs a dangling tool_use left by a crash so recovery doesn't 400 forever (RF-08)", async () => {
+    const dir = tempDir();
+    const dbPath = join(dir, "reef.db");
+
+    // ── crash: a running run whose last message is an assistant tool_use with NO
+    //    matching tool_result (died after appending the turn, before the tool ran) ──
+    {
+      const spine = new Spine(dbPath);
+      spine.upsertAgent(agent);
+      spine.ensureSession("s1", agent.id);
+      spine.appendMessage("s1", "user", [{ type: "text", text: "do it" }]);
+      spine.createRun({ id: "run_1", agentId: agent.id, sessionKey: "s1" });
+      spine.beginStep("run_1", 0);
+      spine.appendMessage("s1", "assistant", [{ type: "tool_use", id: "t1", name: "echo", input: { message: "hi" } }], "run_1");
+      spine.close();
+    }
+
+    // A router that enforces the real provider constraint: the assembled context must
+    // NOT end with an assistant tool_use that has no following tool_result (Anthropic
+    // 400s otherwise). Without the repair, recovery feeds exactly that → permanent fail.
+    const router: ModelRouter = {
+      async generateTurn(input) {
+        const last = input.messages[input.messages.length - 1];
+        if (last?.role === "assistant" && last.content.some((b) => b.type === "tool_use")) {
+          throw new Error("400 messages: tool_use ids must have corresponding tool_result blocks");
+        }
+        return { stop: "completed", content: [{ type: "text", text: "recovered cleanly" }], usage: { inputTokens: 4, outputTokens: 2 } };
+      },
+    };
+    const daemon = new Daemon({ dbPath, workspaceDir: join(dir, "ws"), router });
+    daemon.registerAgent(agent);
+
+    await daemon.recover();
+
+    expect(daemon.spine.getRun("run_1")!.status).toBe("completed"); // not failed/poisoned
+    // a synthetic error tool_result now answers the interrupted tool_use
+    const toolMsg = daemon.spine.getMessages("s1").find((m) => m.role === "tool");
+    expect(toolMsg?.content[0]).toMatchObject({ type: "tool_result", toolUseId: "t1", isError: true });
+    daemon.close();
+  });
+
   it("recovers an interrupted run by re-driving it from the durable record", async () => {
     const dir = tempDir();
     const dbPath = join(dir, "reef.db");

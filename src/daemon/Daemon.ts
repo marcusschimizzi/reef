@@ -357,6 +357,10 @@ export class Daemon {
       await this.resumeRun(runId);
     }
     for (const run of this.spine.getInterruptedRuns()) {
+      // Close any tool_use the crash left unanswered before re-driving — otherwise the
+      // re-driven context ends with a tool_use lacking its tool_result and the provider
+      // 400s on every recovery attempt (RF-08).
+      this.spine.repairDanglingToolUses(run.sessionKey, run.id);
       await this.runLoop(run);
     }
   }

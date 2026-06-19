@@ -340,6 +340,33 @@ export class Spine {
     }));
   }
 
+  /**
+   * Crash repair (RF-08): if a session's log ends with an assistant turn whose
+   * tool_use blocks were never answered (the daemon died after appending the turn but
+   * before the tool_result), append a synthetic error tool_result for each. Otherwise
+   * re-driving the run feeds the provider a tool_use with no matching tool_result and
+   * it 400s on every recovery — poisoning the session forever. Returns how many were
+   * closed (0 = nothing to repair). Only call for RUNNING interrupted runs: a
+   * suspended run's dangling tool_use is intentional (awaiting approval).
+   */
+  repairDanglingToolUses(sessionKey: string, runId?: string): number {
+    const messages = this.getMessages(sessionKey);
+    const last = messages[messages.length - 1];
+    if (!last || last.role !== "assistant") return 0;
+    const toolUses = last.content.filter(
+      (b): b is Extract<ContentBlock, { type: "tool_use" }> => b.type === "tool_use",
+    );
+    if (toolUses.length === 0) return 0;
+    const results: ContentBlock[] = toolUses.map((b) => ({
+      type: "tool_result",
+      toolUseId: b.id,
+      output: "This tool call was interrupted by a daemon restart and did not run.",
+      isError: true,
+    }));
+    this.appendMessage(sessionKey, "tool", results, runId);
+    return toolUses.length;
+  }
+
   /** Messages with seq > afterSeq, seq attached — what compaction cuts on. */
   getMessageEntries(sessionKey: string, afterSeq = 0): MessageEntry[] {
     const rows = this.db
