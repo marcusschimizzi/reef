@@ -566,6 +566,26 @@ export class Spine {
     return rows.map(rowToStep);
   }
 
+  /**
+   * The most recent committed step's usage for a whole SESSION (across all its runs)
+   * — the assembled-context size the provider last measured. Compaction triggers off
+   * this, not the current run's steps: a single-step (chat) run commits its one step
+   * only when it ends, so its own steps are empty at the loop top; the prior run's
+   * step is what tells us the context has grown past the threshold.
+   */
+  getLatestSessionStepUsage(sessionKey: string): Usage | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT s.usage AS usage FROM steps s
+           JOIN runs r ON r.id = s.run_id
+          WHERE r.session_key = ? AND s.state = 'committed' AND s.usage IS NOT NULL
+          ORDER BY s.committed_at DESC, s.idx DESC
+          LIMIT 1`,
+      )
+      .get(sessionKey) as { usage: string | null } | undefined;
+    return row?.usage ? (JSON.parse(row.usage) as Usage) : undefined;
+  }
+
   /** Steps left pending when the daemon died — the in-flight model calls. */
   getPendingSteps(): Array<{ runId: string; index: number }> {
     const rows = this.db

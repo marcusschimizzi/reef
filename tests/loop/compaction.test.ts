@@ -103,6 +103,30 @@ function args(spine: Spine, router: FakeRouter, events: ReefEventInit[], policy:
 }
 
 describe("maybeCompact", () => {
+  it("compacts a fresh single-step (chat) run off the SESSION's last step, not just the current run's (RF-09)", async () => {
+    // A no-tool chat run commits its one step only when it ENDS, so maybeCompact at
+    // the loop top sees 0 committed steps for the current run — it must trigger off the
+    // session's most recent committed step (here, the prior run's) or chat sessions
+    // grow unboundedly and never compact.
+    const spine = seededSpine(tempDb(), 200); // run_1 committed a step measured at 200 tokens
+    spine.createRun({ id: "run_2", agentId: agent.id, sessionKey: "s1" }); // fresh chat run, no steps yet
+    const router = new FakeRouter();
+    const events: ReefEventInit[] = [];
+
+    const did = await maybeCompact({
+      spine,
+      router,
+      run: spine.getRun("run_2")!,
+      agent,
+      emit: (body: unknown) => events.push({ ...(body as object), sessionKey: "s1", runId: "run_2" } as ReefEventInit),
+      policy: { triggerTokens: 100, keepRecentMessages: 2 },
+    });
+
+    expect(did).toBe(true);
+    expect(events.some((e) => e.type === "context.compacted")).toBe(true);
+    expect(spine.getLatestCompaction("s1")?.throughSeq).toBe(3);
+  });
+
   it("folds older messages into a durable summary; getContext returns summary + tail", async () => {
     const spine = seededSpine(tempDb(), 200);
     const router = new FakeRouter();

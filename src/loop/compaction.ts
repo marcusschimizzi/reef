@@ -50,11 +50,12 @@ export async function maybeCompact(args: CompactArgs): Promise<boolean> {
   const { spine, router, run, agent, emit, signal } = args;
   const policy = args.policy ?? DEFAULT_COMPACTION;
 
-  // 1. Trigger on the size the provider actually measured last turn. inputTokens
-  //    of the most recent committed step IS the assembled-context size.
-  const committed = spine.getSteps(run.id).filter((s) => s.state === "committed");
-  const last = committed[committed.length - 1];
-  if (!last?.usage || last.usage.inputTokens < policy.triggerTokens) return false;
+  // 1. Trigger on the size the provider actually measured last turn — the most recent
+  //    committed step's inputTokens IS the assembled-context size. Read it at the
+  //    SESSION level (not just this run): a single-step chat run commits its one step
+  //    only when it ends, so checking the current run alone never fires for chat.
+  const lastUsage = spine.getLatestSessionStepUsage(run.sessionKey);
+  if (!lastUsage || lastUsage.inputTokens < policy.triggerTokens) return false;
 
   // 2. Decide the cut: fold everything before a verbatim recent tail, with the
   //    boundary snapped back off any leading `tool` message so a tool_use/
