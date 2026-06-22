@@ -65,6 +65,49 @@ describe("Spine — batch-3 review fixes", () => {
     expect(spine.getCodingSession("cs_1")!.ownerAgentId).toBe(agent.id);
     spine.close();
   });
+
+  it("the migration backfills owner_agent_id for legacy sessions, so an upgraded db's agent can still revive its own (PR #4 review finding)", () => {
+    const path = tempDbPath();
+    const spine = new Spine(path);
+    spine.upsertAgent(agent);
+    spine.ensureSession("s1", agent.id);
+    spine.createRun({ id: "run_owner", agentId: agent.id, sessionKey: "s1" });
+    // an agent-started session (has a spawning run) ...
+    spine.createCodingSession({
+      id: "cs_agent",
+      spawningRunId: "run_owner",
+      spawningToolUseId: "tool_1",
+      agentKind: "claude-code",
+      externalSessionId: "ext_1",
+      directory: "/tmp/x",
+      status: "paused",
+      task: "t",
+      tracePath: "/tmp/cs_agent.jsonl",
+    });
+    // ... and an operator-started session (no spawning run → genuinely unowned)
+    spine.createCodingSession({
+      id: "cs_operator",
+      spawningRunId: null,
+      spawningToolUseId: null,
+      agentKind: "claude-code",
+      externalSessionId: "ext_2",
+      directory: "/tmp/y",
+      status: "paused",
+      task: "t",
+      tracePath: "/tmp/cs_operator.jsonl",
+    });
+    // simulate a db created before owner_agent_id existed: the column ALTERs in as NULL
+    spine.connection.prepare(`UPDATE coding_sessions SET owner_agent_id = NULL`).run();
+    spine.close();
+
+    // re-open → the constructor re-runs the migration, which backfills the owner
+    const upgraded = new Spine(path);
+    // the agent-started session is re-attributed to its creator → guard passes, revivable
+    expect(upgraded.getCodingSession("cs_agent")!.ownerAgentId).toBe(agent.id);
+    // the operator-started session has no spawning run → stays unowned (agent revive still denied)
+    expect(upgraded.getCodingSession("cs_operator")!.ownerAgentId).toBeNull();
+    upgraded.close();
+  });
 });
 
 describe("Spine", () => {
