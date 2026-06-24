@@ -36,7 +36,7 @@ class FakeDriver implements CodingAgentDriver {
   start(opts: StartOpts): CodingDriverHandle { this.lastOpts = opts; return this.handle; }
 }
 
-function setup(policy: ApprovalPolicy = new FakePolicy(() => ({ action: "gate" })), idleMs?: number) {
+function setup(policy: ApprovalPolicy = new FakePolicy(() => ({ action: "gate" })), idleMs?: number, startupMs?: number, proactiveApprovalTimeoutMs?: number) {
   const dir = tmp();
   const spine = new Spine(join(dir, "reef.db"));
   const events: ReefEvent[] = [];
@@ -53,7 +53,7 @@ function setup(policy: ApprovalPolicy = new FakePolicy(() => ({ action: "gate" }
     return () => { triggerStopHook = undefined; disposed = true; };
   };
   const mgr = new CodingSessionManager({
-    spine, emit, driver, traceDir: join(dir, "traces"), policy, idleMs, watchHandbackFile,
+    spine, emit, driver, traceDir: join(dir, "traces"), policy, idleMs, startupMs, proactiveApprovalTimeoutMs, watchHandbackFile,
   });
   return {
     spine, events, driver, mgr, dir,
@@ -251,6 +251,77 @@ describe("CodingSessionManager", () => {
       driver.handle.die(143); // exit finalizes paused
       expect(events.find((e) => e.type === "coding.session.paused")).toMatchObject({ codingSessionId: id });
       expect(spine.getCodingSession(id)!.status).toBe("paused");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("arms an auto-deny expiry on a gated PROACTIVE coding prompt, not an interactive one (finding #1)", () => {
+    // interactive session: a gated prompt waits for the human — no auto-deny deadline.
+    {
+      const { spine, events, mgr, driver } = setup(new FakePolicy(() => ({ action: "gate" })), undefined, undefined, 60_000);
+      mgr.start({ agentKind: "claude-code", directory: "/tmp/i", task: "t" });
+      driver.handle.feed("Do you want to edit a.ts?\n❯ 1. Yes\n  2. No\n");
+      const appr = (events.find((e) => e.type === "approval.requested") as { approvalId: string }).approvalId;
+      expect(spine.getCodingApproval(appr)!.expiresAt).toBeUndefined();
+    }
+    // proactive session (spawned by a trigger run): a gated prompt has no human to
+    // answer inline, so it gets an auto-deny deadline the scheduler sweep enforces.
+    {
+      const { spine, events, mgr, driver } = setup(new FakePolicy(() => ({ action: "gate" })), undefined, undefined, 60_000);
+      mgr.start({ agentKind: "claude-code", directory: "/tmp/p", task: "t", source: { kind: "trigger", triggerId: "t1", triggerType: "schedule" } });
+      driver.handle.feed("Do you want to edit b.ts?\n❯ 1. Yes\n  2. No\n");
+      const appr = (events.find((e) => e.type === "approval.requested") as { approvalId: string }).approvalId;
+      expect(spine.getCodingApproval(appr)!.expiresAt).toBeTruthy();
+    }
+  });
+
+  it("resume() governs the revived increment under the reviving run's source (finding #2)", () => {
+    // deny proactive prompts, gate interactive — mirrors DefaultPolicy's proactive auto-deny.
+    const policy = new FakePolicy((ctx) => (ctx.source.kind === "trigger" ? { action: "deny" } : { action: "gate" }));
+    const { spine, driver, mgr, getTrigger } = setup(policy);
+    const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+    // hand back → paused
+    getTrigger()!();
+    driver.handle.die(143);
+    expect(spine.getCodingSession(id)!.status).toBe("paused");
+
+    // revive under a PROACTIVE source (a trigger run calling send_feedback).
+    mgr.resume(id, "continue", { source: { kind: "trigger", triggerId: "trg", triggerType: "schedule" } });
+
+    // an inner prompt in the revived increment must be auto-denied (No), not gated &
+    // hung — i.e. the policy must see the proactive source, not a hardcoded "message".
+    driver.handle.feed("Do you want to edit a.ts?\n❯ 1. Yes\n  2. No\n");
+    expect(policy.last?.source.kind).toBe("trigger");
+    expect(driver.handle.written).toContain("2\r");
+  });
+
+  it("a session that produces NO output is killed by the startup liveness timer and recorded failed", () => {
+    vi.useFakeTimers();
+    try {
+      const { spine, events, mgr, driver } = setup(new FakePolicy(() => ({ action: "allow" })), 5000, 30);
+      const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+      // No output is ever fed — the spawn is stuck (e.g. a hung auth prompt). The
+      // idle timer never arms (it arms on output), so only the startup timer saves us.
+      vi.advanceTimersByTime(40); // > startupMs (30), < idleMs (5000)
+      expect(driver.handle.killed).toBe(true);
+      driver.handle.die(143); // the kill exits the PTY → onExit records the failure
+      expect(spine.getCodingSession(id)!.status).toBe("failed");
+      const failed = events.find((e) => e.type === "coding.session.failed") as { error: string } | undefined;
+      expect(failed?.error).toMatch(/no output|failed to start/i);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("first output disarms the startup timer (a normal session is not killed)", () => {
+    vi.useFakeTimers();
+    try {
+      const { mgr, driver } = setup(new FakePolicy(() => ({ action: "allow" })), 5000, 30);
+      mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
+      driver.handle.feed("banner appears\n"); // first output before startupMs disarms it
+      vi.advanceTimersByTime(40); // past startupMs — must NOT kill (idle window is 5000)
+      expect(driver.handle.killed).toBe(false);
     } finally {
       vi.useRealTimers();
     }

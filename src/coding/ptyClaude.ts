@@ -6,6 +6,7 @@
 
 import * as pty from "node-pty";
 import { safeChildEnv } from "../core/env.js";
+import { killProcessGroup } from "../core/processKill.js";
 import type { CodingAgentDriver, CodingDriverHandle, StartOpts } from "./driver.js";
 
 /** The `claude` argv for a session. Extracted so it's unit-testable without
@@ -44,7 +45,20 @@ export class PtyClaudeDriver implements CodingAgentDriver {
       onData: (cb) => { proc.onData(cb); },
       onExit: (cb) => { proc.onExit(({ exitCode }) => cb(exitCode)); },
       write: (data) => proc.write(data),
-      kill: () => { try { proc.kill(); } catch { /* already dead */ } },
+      kill: () => {
+        try {
+          // node-pty setsid's the child, so its pid leads the process group: SIGTERM→
+          // SIGKILL the GROUP to reap claude AND its grandchildren (MCP servers, Bash
+          // tool subprocesses) instead of orphaning them. proc.kill() also tears down
+          // the PTY master fd. When the PTY exits, cancel the pending force-kill so we
+          // never re-signal a freed (possibly reused) process group.
+          if (proc.pid) {
+            const cancel = killProcessGroup(proc.pid);
+            proc.onExit(() => cancel());
+          }
+          proc.kill();
+        } catch { /* already dead */ }
+      },
     };
   }
 }

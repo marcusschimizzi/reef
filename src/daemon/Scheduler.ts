@@ -8,6 +8,11 @@ export const DEFAULT_TICK_MS = 30_000;
 
 export class Scheduler {
   private timer: NodeJS.Timeout | undefined;
+  /** True while a tick is in flight — the next interval is skipped rather than run
+   *  concurrently. Without this, a tick slower than the interval (e.g. a sweep that
+   *  resolves approvals, or many due triggers) overlaps itself: two reconciliation
+   *  passes race the same due triggers (double-fire) and the same expiring approvals. */
+  private ticking = false;
 
   constructor(
     private readonly onTick: () => void | Promise<void>,
@@ -17,7 +22,22 @@ export class Scheduler {
   start(): void {
     if (this.timer) return;
     this.timer = setInterval(() => {
-      void this.onTick();
+      if (this.ticking) return; // a previous tick is still running — skip, don't overlap
+      this.ticking = true;
+      // Invoke onTick INSIDE the async body so a SYNCHRONOUS throw is caught too (else
+      // it escapes the callback with ticking=true → every future tick wedges). The
+      // catch also keeps a rejecting tick from becoming an unhandledRejection; finally
+      // always clears the guard so the cadence survives any tick error.
+      void (async () => {
+        try {
+          await this.onTick();
+        } catch {
+          // Tick error swallowed here (no wedge, no unhandledRejection); tick-level
+          // error observability is the tick handler's own concern.
+        } finally {
+          this.ticking = false;
+        }
+      })();
     }, this.intervalMs);
     // Don't keep the process alive solely for the scheduler.
     this.timer.unref?.();

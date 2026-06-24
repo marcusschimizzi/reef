@@ -36,6 +36,7 @@ import { VercelRouter, type ModelRouter } from "../model/router.js";
 import type { MemoryStore } from "../memory/seam.js";
 import type { ReefEvent } from "../protocol/events.js";
 import { parseApprovalDecision } from "../protocol/events.js";
+import { wrapUntrusted } from "../core/untrusted.js";
 import type { ApprovalNotification, Surface } from "../surfaces/index.js";
 import { SqliteMemory } from "../memory/sqlite.js";
 import { builtinTools } from "../tools/builtins.js";
@@ -99,6 +100,17 @@ interface Wake {
 // scheduler would otherwise catch it within a tick). The `skip` catch-up policy
 // drops such fires; `fire_once` runs them anyway.
 const MISSED_GRACE_MS = 90_000;
+
+// Coding-session statuses that are terminal from the spawning run's point of view:
+// the run can collect a result and continue. `paused` = handed back (resumable);
+// `process_lost` = the PTY died (crash) — a resumable failure. The non-terminal ones
+// (running, awaiting_decision) mean the increment is still in flight.
+const TERMINAL_CODING_STATUSES: ReadonlySet<string> = new Set([
+  "completed",
+  "failed",
+  "paused",
+  "process_lost",
+]);
 
 // Everything the agent might wake for funnels into one serial inbox: a user
 // message, a resume after an approval resolved, or a trigger firing (reef-docs/05
@@ -181,6 +193,7 @@ export class Daemon {
       driver: opts.codingDriver ?? new PtyClaudeDriver(),
       traceDir: opts.codingTraceDir ?? join(opts.workspaceDir, "..", "coding-sessions"),
       policy: this.policy,
+      proactiveApprovalTimeoutMs: this.approvalTimeoutMs,
       watchHandbackFile: opts.codingWatchHandbackFile,
     });
     // Watch our own event stream to route proactive approval requests out to
@@ -240,6 +253,11 @@ export class Daemon {
     for (const approval of this.spine.getExpiredApprovals(now.toISOString())) {
       this.resolveApproval(approval.id, "deny");
     }
+    // Coding-session approvals from a proactive run have no human attached either;
+    // sweep them through the same resolve path (which forks to inject "No").
+    for (const coding of this.spine.getExpiredCodingApprovals(now.toISOString())) {
+      this.resolveApproval(coding.id, "deny");
+    }
   }
 
   /** The scheduler's periodic work: fire due triggers, then expire stale approvals. */
@@ -287,7 +305,6 @@ export class Daemon {
     const coding = this.spine.getCodingApproval(approvalId);
     if (coding) {
       if (coding.status !== "pending") return false;
-      this.spine.resolveCodingApproval(approvalId, status, decision);
       this.sink.emit({
         type: "approval.resolved",
         sessionKey: `coding:${coding.codingSessionId}`,
@@ -295,6 +312,10 @@ export class Daemon {
         approvalId,
         decision,
       });
+      // The manager owns coding-approval resolution: it flips the durable row AND
+      // injects the answer keystroke. (Do NOT flip the row here first — that would
+      // make the manager's pending-guard early-return and skip the injection, leaving
+      // the PTY stuck at its prompt.)
       this.coding.resolveCodingApproval(approvalId, decision);
       return true;
     }
@@ -321,9 +342,48 @@ export class Daemon {
    * returned here — they resume only when their approvals resolve.
    */
   async recover(): Promise<void> {
+    // Rebuild the in-memory run→source routing map from the durable record. A run
+    // suspended (awaiting approval/subwork) before the crash is NOT re-driven here — it
+    // resumes later when its approval resolves — and that resume path won't re-emit
+    // run.started, so without this seed routeApproval wouldn't know it's proactive.
+    for (const run of this.spine.listSuspendedRuns()) {
+      this.runMeta.set(run.id, { proactive: run.source?.kind === "trigger", agentId: run.agentId });
+    }
+    // A coding session left non-terminal by a crash has a dead PTY (its child process
+    // died with the daemon) but its row still says running, and its spawning run is
+    // parked `awaiting_subwork` — which getInterruptedRuns does NOT return, so it would
+    // hang forever. Reconcile those first: mark the session process_lost and resume the
+    // stranded run so it collects an (error) result and continues.
+    for (const runId of this.recoverCodingSessions()) {
+      await this.resumeRun(runId);
+    }
     for (const run of this.spine.getInterruptedRuns()) {
+      // Close any tool_use the crash left unanswered before re-driving — otherwise the
+      // re-driven context ends with a tool_use lacking its tool_result and the provider
+      // 400s on every recovery attempt (RF-08).
+      this.spine.repairDanglingToolUses(run.sessionKey, run.id);
       await this.runLoop(run);
     }
+  }
+
+  /** Mark coding sessions orphaned by a crash as `process_lost` (the daemon just
+   *  started, so nothing is live — any still-running row is dead). Returns the
+   *  spawning run ids parked `awaiting_subwork` that need resuming. */
+  private recoverCodingSessions(): string[] {
+    const toResume: string[] = [];
+    for (const cs of this.spine.listCodingSessions()) {
+      if (cs.status !== "running" && cs.status !== "awaiting_decision") continue;
+      const diag =
+        `The coding session (${cs.id}) was interrupted by a daemon restart — its process did not ` +
+        `survive (status before the restart: ${cs.status}). It can be revived from where it left off ` +
+        `with send_feedback("${cs.id}", "<how to continue>").`;
+      this.spine.setCodingSessionStatus(cs.id, "process_lost", diag);
+      if (cs.spawningRunId) {
+        const run = this.spine.getRun(cs.spawningRunId);
+        if (run?.status === "suspended") toResume.push(cs.spawningRunId);
+      }
+    }
+    return toResume;
   }
 
   /** Cancel the in-flight run for a session (reef-docs/03 cancellation). Also
@@ -527,7 +587,7 @@ export class Daemon {
    */
   runsAwaitingApproval(): Array<{ run: Run; approvals: Approval[] }> {
     return this.spine
-      .listRuns({ status: "suspended" })
+      .listSuspendedRuns()
       .filter((r) => r.stopReason === "awaiting_approval")
       .map((run) => ({
         run,
@@ -627,6 +687,7 @@ export class Daemon {
       id: newRunId(),
       agentId: wake.agentId,
       sessionKey: wake.sessionKey,
+      source: { kind: "message" },
     });
     this.sink.emit({
       type: "message.received",
@@ -649,21 +710,24 @@ export class Daemon {
       trigger.agentId,
       this.spine.getAgent(trigger.agentId)?.model,
     );
+    // The file path is filesystem-controlled (an attacker can name a file with
+    // injection text), so the change description crosses the trust boundary — wrap it.
     const text = event
-      ? `${trigger.input}\n\n(file event: ${event.type} at ${event.path})`
+      ? `${trigger.input}\n\n${wrapUntrusted(`file event: ${event.type} at ${event.path}`, "file-watch")}`
       : trigger.input;
     this.spine.appendMessage(trigger.sessionKey, "user", [{ type: "text", text }]);
-    const run = this.spine.createRun({
-      id: newRunId(),
-      agentId: trigger.agentId,
-      sessionKey: trigger.sessionKey,
-    });
     const source: RunSource = {
       kind: "trigger",
       triggerId: trigger.id,
       triggerType: trigger.type,
       ...(event ? { event } : {}),
     };
+    const run = this.spine.createRun({
+      id: newRunId(),
+      agentId: trigger.agentId,
+      sessionKey: trigger.sessionKey,
+      source,
+    });
     this.sink.emit({
       type: "message.received",
       text,
@@ -686,6 +750,12 @@ export class Daemon {
   }
 
   private async runLoop(run: Run, options: LoopOptions = {}): Promise<void> {
+    // Resolve the wake source: an explicit option wins, else the run's DURABLE source
+    // (so a recovered/resumed run keeps its proactive policy), else a plain message.
+    const resolvedOptions: LoopOptions = {
+      ...options,
+      source: options.source ?? run.source ?? { kind: "message" },
+    };
     const agent = this.spine.getAgent(run.agentId);
     if (!agent) {
       this.spine.setRunStatus(run.id, "failed", {
@@ -727,7 +797,21 @@ export class Daemon {
               // A revive intentionally re-links the SAME session to this run+tool, so
               // (unlike start) it must NOT short-circuit on a prior subwork link.
               const input = sendFeedback.inputSchema.parse(call.input);
-              this.coding.resume(input.sessionId, input.text, { spawningRunId: r.id, spawningToolUseId: call.id });
+              // Scope: an agent may only revive a coding session one of ITS OWN runs
+              // started — not an operator's or another agent's. Otherwise the model
+              // could push attacker/model-controlled task+dir into a repo it never
+              // initiated. The throw becomes a graceful isError tool_result (the loop's
+              // startSubwork catch), so the model can recover rather than the run failing.
+              // Scope on the STABLE owner (stamped at creation), not the spawning run —
+              // operator/agent revives rewrite spawning_run_id, which would otherwise
+              // lock the owning agent out of its own session.
+              const cs = this.spine.getCodingSession(input.sessionId);
+              if (!cs || cs.ownerAgentId !== r.agentId) {
+                throw new Error(
+                  `send_feedback denied: coding session ${input.sessionId} was not started by this agent`,
+                );
+              }
+              this.coding.resume(input.sessionId, input.text, { spawningRunId: r.id, spawningToolUseId: call.id, source: src });
               return input.sessionId;
             }
             // Idempotent: if this (run, toolUse) already spawned a session, reuse it
@@ -747,18 +831,22 @@ export class Daemon {
           },
           collectSubwork: (runId, toolUseId) => {
             const cs = this.spine.findCodingSessionBySubwork(runId, toolUseId);
-            // `paused` = handed back (increment done, resumable); a completable
-            // result for the manager run, like completed/failed.
-            if (!cs || (cs.status !== "completed" && cs.status !== "failed" && cs.status !== "paused")) return undefined;
+            // `paused` = handed back (increment done, resumable); `process_lost` = the
+            // PTY died (crash recovery) — both are completable results for the manager
+            // run, like completed/failed. process_lost is failed-shaped (isError).
+            if (!cs || !TERMINAL_CODING_STATUSES.has(cs.status)) return undefined;
             return {
-              result: cs.result ?? `coding session ${cs.id} ${cs.status}`,
-              failed: cs.status === "failed",
+              // The increment summary is a supervised sub-agent's output (scraped from
+              // the repo it read) re-entering this tool-holding parent run — wrap it so
+              // the parent treats it as data, not instructions (RF-22, sharpest case).
+              result: wrapUntrusted(cs.result ?? `coding session ${cs.id} ${cs.status}`, "coding-session"),
+              failed: cs.status === "failed" || cs.status === "process_lost",
               sessionId: cs.id,
               status: cs.status,
             };
           },
         },
-        options,
+        resolvedOptions,
       );
     } finally {
       this.aborters.delete(run.sessionKey);

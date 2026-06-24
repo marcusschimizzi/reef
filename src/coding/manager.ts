@@ -39,6 +39,14 @@ export interface CodingSessionManagerDeps {
   appendSystemPrompt?: string;
   /** Idle window (ms) after the last output before the session hands back. */
   idleMs?: number;
+  /** Startup window (ms): if the spawned agent produces NO output within this
+   *  window it's treated as a failed start (stuck auth, hung spawn) and killed —
+   *  the idle timer only arms on output, so a zero-output hang needs this guard. */
+  startupMs?: number;
+  /** Auto-deny deadline (ms) armed on a gated prompt in a PROACTIVE session — there's
+   *  no human to answer it inline, so the scheduler sweep denies it past this window
+   *  (prevents a routed proactive coding gate from deadlocking the session + its run). */
+  proactiveApprovalTimeoutMs?: number;
   /** Watch a handback sentinel file for creation; returns a disposer. Injected in
    *  tests to trigger the signal deterministically. Defaults to an fs watcher. */
   watchHandbackFile?: (file: string, onSignal: () => void) => () => void;
@@ -62,6 +70,9 @@ interface Live {
   trace: TraceWriter;
   source: RunSource;
   idleTimer?: ReturnType<typeof setTimeout>;
+  /** Liveness timer armed at launch; a zero-output spawn that never arms idle is
+   *  killed when this fires. Cleared on first output. */
+  startupTimer?: ReturnType<typeof setTimeout>;
   /** Latch: once handed back (sentinel or idle), never act again. */
   handedBack: boolean;
   /** Disposer for the Stop-hook sentinel-file watcher; cleared on teardown. */
@@ -84,8 +95,12 @@ export class CodingSessionManager {
    *  default so legitimate gaps — model thinking, a slow build, a big grep — don't
    *  prematurely kill an active session. Bad env → NaN → falsy → default. */
   private readonly idleMs: number;
+  private readonly startupMs: number;
+  private readonly proactiveApprovalTimeoutMs: number;
   constructor(private readonly deps: CodingSessionManagerDeps) {
     this.idleMs = deps.idleMs ?? (Number(process.env.REEF_CODING_IDLE_MS) || 300_000);
+    this.startupMs = deps.startupMs ?? (Number(process.env.REEF_CODING_STARTUP_MS) || 60_000);
+    this.proactiveApprovalTimeoutMs = deps.proactiveApprovalTimeoutMs ?? 3_600_000;
   }
 
   start(opts: StartCodingSession): string {
@@ -132,9 +147,11 @@ export class CodingSessionManager {
    *  Re-links the session to the reviving run+tool so the new result routes back.
    *  Throws if the session isn't a resumable `paused` one (→ a graceful error
    *  tool_result via the loop's subwork-failure path). */
-  resume(sessionId: string, text: string, opts: { spawningRunId?: string | null; spawningToolUseId?: string | null } = {}): void {
+  resume(sessionId: string, text: string, opts: { spawningRunId?: string | null; spawningToolUseId?: string | null; source?: RunSource } = {}): void {
     const cs = this.deps.spine.getCodingSession(sessionId);
-    if (!cs || cs.status !== "paused") {
+    // `paused` = handed back; `process_lost` = interrupted by a crash. Both are
+    // revivable via `claude --resume <uuid>` (the session JSONL survives on disk).
+    if (!cs || (cs.status !== "paused" && cs.status !== "process_lost")) {
       throw new Error(`coding session ${sessionId} is not resumable (status: ${cs?.status ?? "not found"})`);
     }
     this.deps.spine.relinkCodingSessionSubwork(sessionId, opts.spawningRunId ?? null, opts.spawningToolUseId ?? null);
@@ -145,7 +162,10 @@ export class CodingSessionManager {
       directory: cs.directory,
       task: text,
       model: cs.model,
-      source: { kind: "message" },
+      // Govern the revived increment under the REVIVING run's source: a proactive
+      // (trigger/heartbeat) send_feedback must run under proactive policy so an inner
+      // prompt auto-denies instead of gating with no human to answer.
+      source: opts.source ?? { kind: "message" },
       resume: true,
       tracePath: cs.tracePath,
     });
@@ -196,7 +216,14 @@ export class CodingSessionManager {
     const watch = this.deps.watchHandbackFile ?? defaultWatchHandbackFile;
     const dispose = watch(handbackFile, () => this.handback(id, "stop-hook"));
     const l0 = this.live.get(id);
-    if (l0) l0.disposeWatch = dispose;
+    if (l0) {
+      l0.disposeWatch = dispose;
+      // Arm the startup liveness timer: a spawn that produces NO output (the idle
+      // timer arms only on output) — e.g. a stuck auth prompt or hung binary —
+      // would otherwise leave the session running and its spawning run parked
+      // forever. First output disarms it.
+      l0.startupTimer = setTimeout(() => this.onStartupTimeout(id), this.startupMs);
+    }
 
     handle.onData((chunk) => {
       trace.write({ type: "pty.raw", bytes: Buffer.from(chunk, "utf8").toString("base64") });
@@ -283,6 +310,8 @@ export class CodingSessionManager {
     const l = this.live.get(id);
     l?.trace.write({ type: "event", event: ev });
     if (ev.type === "output") {
+      // First output → the spawn is alive; disarm the startup liveness timer.
+      if (l?.startupTimer) { clearTimeout(l.startupTimer); l.startupTimer = undefined; }
       if (l) l.sawOutput = true;
       this.emitCoding(id, { type: "coding.output", codingSessionId: id, text: ev.text });
       // Handback is detected by the Stop hook (post-turn-completion) + idle, both of
@@ -304,7 +333,24 @@ export class CodingSessionManager {
   }
   private disarmIdle(id: string): void {
     const l = this.live.get(id);
-    if (l?.idleTimer) { clearTimeout(l.idleTimer); l.idleTimer = undefined; }
+    if (!l) return;
+    if (l.idleTimer) { clearTimeout(l.idleTimer); l.idleTimer = undefined; }
+    if (l.startupTimer) { clearTimeout(l.startupTimer); l.startupTimer = undefined; }
+  }
+
+  /** Startup liveness timer fired: the agent produced no output in the window, so
+   *  the spawn is stuck (hung auth / bad binary). Kill it WITHOUT a handback/cancel
+   *  flag → onExit's failed branch records the zero-output "likely failed to start"
+   *  diagnostic and resumes the spawning run, instead of hanging awaiting_subwork. */
+  private onStartupTimeout(id: string): void {
+    const l = this.live.get(id);
+    // disarmIdle (called on every teardown path) already clears this timer before
+    // cancelling/handingBack are set, so this is belt-and-suspenders: never kill a
+    // session that's already producing output, handed back, cancelling, or torn down.
+    if (!l || l.sawOutput || l.handedBack || this.cancelling.has(id) || this.handingBack.has(id)) return;
+    l.startupTimer = undefined;
+    l.trace.write({ type: "lifecycle", event: "startup-timeout" });
+    l.handle.kill();
   }
 
   /** Dispose the Stop-hook sentinel watcher so no fs.watch leaks and a late Stop
@@ -424,7 +470,7 @@ export class CodingSessionManager {
   private gate(
     id: string,
     ev: { promptText: string; options: { index: number; label: string }[] },
-    ctx: { toolName: string; input: unknown },
+    ctx: { toolName: string; input: unknown; source: RunSource },
   ): void {
     const approvalId = newApprovalId();
     this.deps.spine.createCodingApproval({
@@ -435,6 +481,15 @@ export class CodingSessionManager {
       toolName: ctx.toolName,
       input: ctx.input,
     });
+    // A proactive (trigger/heartbeat) session has no human to answer this prompt
+    // inline — arm an auto-deny deadline the scheduler sweep enforces, so a routed
+    // proactive coding gate can't deadlock the session and its spawning run forever.
+    if (ctx.source.kind === "trigger") {
+      this.deps.spine.setCodingApprovalExpiry(
+        approvalId,
+        new Date(Date.now() + this.proactiveApprovalTimeoutMs).toISOString(),
+      );
+    }
     this.deps.emit({
       type: "approval.requested",
       approvalId,

@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { z } from "zod";
 import { safeChildEnv } from "../core/env.js";
+import { killProcessGroup } from "../core/processKill.js";
 import type { Tool } from "./types.js";
 
 // The shell tool — reef's escape hatch to the wider machine. Unlike the file
@@ -35,15 +36,31 @@ function runCommand(
   return new Promise((resolve, reject) => {
     // Curated env only — never hand the daemon's API keys/tokens to an arbitrary
     // command. --norc/--noprofile keep execution deterministic and independent of the
-    // user's interactive dotfiles (which can differ by how the daemon was launched).
+    // user's interactive dotfiles. `detached` puts the command in its OWN process group
+    // (pgid === child.pid) so a timeout/cancel can SIGTERM→SIGKILL the WHOLE group and
+    // not orphan grandchildren — and crucially never signals the daemon's own group.
     const child = spawn("bash", ["--norc", "--noprofile", "-c", command], {
       cwd,
-      signal,
+      detached: true,
       env: safeChildEnv(),
     });
     let stdout = "";
     let stderr = "";
-    const timer = setTimeout(() => child.kill("SIGKILL"), TIMEOUT_MS);
+    let cancelKill: (() => void) | undefined;
+    const killGroup = (): void => { if (child.pid) cancelKill = killProcessGroup(child.pid); };
+    const timer = setTimeout(killGroup, TIMEOUT_MS);
+    const onAbort = (): void => killGroup();
+    if (signal) {
+      if (signal.aborted) killGroup();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      // The child exited (close/error) — cancel any pending force-kill so we don't
+      // re-signal the (now-freed, possibly reused) process group.
+      cancelKill?.();
+    };
 
     child.stdout.on("data", (d: Buffer) => {
       if (stdout.length < MAX_OUTPUT) stdout += d.toString("utf8");
@@ -52,11 +69,11 @@ function runCommand(
       if (stderr.length < MAX_OUTPUT) stderr += d.toString("utf8");
     });
     child.on("error", (err) => {
-      clearTimeout(timer);
+      cleanup();
       reject(err);
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
+      cleanup();
       resolve({
         stdout: stdout.slice(0, MAX_OUTPUT),
         stderr: stderr.slice(0, MAX_OUTPUT),

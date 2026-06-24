@@ -208,6 +208,32 @@ function migrate(db: Database): void {
   addColumnIfMissing(db, "sessions", "model", "TEXT");
   addColumnIfMissing(db, "coding_sessions", "spawning_tool_use_id", "TEXT");
   addColumnIfMissing(db, "coding_sessions", "model", "TEXT");
+  addColumnIfMissing(db, "runs", "source", "TEXT"); // JSON RunSource — durable so recovery re-drives under the right policy
+  addColumnIfMissing(db, "coding_sessions", "owner_agent_id", "TEXT"); // stable creator — survives spawning-run relinks (send_feedback scoping)
+  backfillCodingSessionOwners(db);
+}
+
+/**
+ * A db that predates `owner_agent_id` gets the column ALTERed in as NULL on every
+ * existing row. The send_feedback ownership guard treats a null owner as "not yours"
+ * and denies revival — so an upgraded daemon could never revive its own legacy
+ * paused/process_lost sessions, exactly the flow crash-recovery tells it to use.
+ *
+ * Re-derive the owner the same way `createCodingSession` does — the spawning run's
+ * agent. Legacy rows predate agent-side revival (introduced alongside this column),
+ * so their `spawning_run_id` still names the original creator. Idempotent: only rows
+ * with a still-null owner AND a resolvable spawning run are touched, so re-running on
+ * every boot recomputes the identical value and never overwrites a recorded owner
+ * (operator-started sessions have no spawning run and stay correctly unowned).
+ */
+function backfillCodingSessionOwners(db: Database): void {
+  db.exec(
+    `UPDATE coding_sessions
+        SET owner_agent_id = (SELECT agent_id FROM runs WHERE runs.id = coding_sessions.spawning_run_id)
+      WHERE owner_agent_id IS NULL
+        AND spawning_run_id IS NOT NULL
+        AND EXISTS (SELECT 1 FROM runs WHERE runs.id = coding_sessions.spawning_run_id)`,
+  );
 }
 
 function addColumnIfMissing(

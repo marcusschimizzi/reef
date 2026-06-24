@@ -246,6 +246,9 @@ describe("Daemon coding-session control", () => {
 
     expect(daemon.spine.getRun(run!.id)!.status).toBe("completed");
     expect(daemon.spine.getCodingSession(cs!.id)!.status).toBe("completed");
+    // the sub-agent's result re-enters the parent wrapped as untrusted content (RF-22)
+    const toolMsg = daemon.spine.getMessages("s1").find((m) => m.role === "tool");
+    expect(JSON.stringify(toolMsg?.content[0])).toContain('untrusted-content source=\\"coding-session\\"');
     daemon.close();
   });
 
@@ -307,6 +310,142 @@ describe("Daemon coding-session control", () => {
     expect(daemon.spine.listCodingSessions().length).toBe(1);
     expect(daemon.spine.getCodingSession(cs.id)!.status).toBe("paused");
     daemon.close();
+  });
+
+  it("sweepExpiredApprovals auto-denies an expired pending coding approval (route-mode backstop, finding #1)", () => {
+    const dir = tmp();
+    const driver = new FakeDriver();
+    const d = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      codingTraceDir: join(dir, "traces"),
+      codingWatchHandbackFile: (_f, _on) => () => {},
+      router: new NullRouter(),
+      codingDriver: driver,
+    });
+    const id = d.startCodingSession({ agentKind: "claude-code", directory: tmp(), task: "t" }); // live session
+    // A proactive coding gate armed an expiry earlier; the deadline has now passed and
+    // no human answered. (Simulated directly — the arming path is covered separately.)
+    d.spine.createCodingApproval({
+      id: "ca_1",
+      codingSessionId: id,
+      promptText: "Do you want to edit a.ts?",
+      options: [{ index: 1, label: "Yes" }, { index: 2, label: "No" }],
+      toolName: "claude-code:Write",
+      input: {},
+    });
+    d.spine.setCodingApprovalExpiry("ca_1", new Date(Date.now() - 1000).toISOString());
+    expect(d.spine.getCodingApproval("ca_1")!.status).toBe("pending");
+
+    d.sweepExpiredApprovals(new Date());
+
+    // auto-denied (no permanent deadlock) and the manager injected "No" into the live PTY
+    expect(d.spine.getCodingApproval("ca_1")!.status).toBe("denied");
+    expect(driver.handle.written).toContain("2\r");
+    d.close();
+  });
+
+  it("send_feedback refuses to revive a coding session this agent did not start (finding #4 scoping)", async () => {
+    const dir = tmp();
+    const driver = new FakeDriver();
+    let trigger: (() => void) | undefined;
+    let opSessionId = "";
+    let turn = 0;
+    const router: ModelRouter = {
+      async generateTurn(input: ModelTurnInput): Promise<ModelTurn> {
+        turn++;
+        if (turn === 1) {
+          return { stop: "tool_use", content: [{ type: "tool_use", id: "tool_1", name: "send_feedback", input: { sessionId: opSessionId, text: "hijack the operator's repo" } }], usage: { inputTokens: 5, outputTokens: 2 } };
+        }
+        input.onTextDelta?.("acknowledged the refusal");
+        return { stop: "completed", content: [{ type: "text", text: "acknowledged the refusal" }], usage: { inputTokens: 4, outputTokens: 1 } };
+      },
+    };
+    const d = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      codingTraceDir: join(dir, "traces"),
+      codingWatchHandbackFile: (_f, on) => { trigger = on; return () => { trigger = undefined; }; },
+      router,
+      policy: new AllowPolicy(),
+      codingDriver: driver,
+    });
+    d.registerAgent({ ...agent, toolAllowlist: ["send_feedback"] });
+
+    // An OPERATOR starts a coding session (no spawning run) and it hands back → paused.
+    opSessionId = d.startCodingSession({ agentKind: "claude-code", directory: tmp(), task: "operator work" });
+    trigger!();
+    driver.handle.die(143);
+    expect(d.spine.getCodingSession(opSessionId)!.status).toBe("paused");
+
+    // The agent tries to revive the operator's session via send_feedback.
+    await d.submit({ sessionKey: "s1", agentId: "reef", message: "go" });
+
+    // Refused: the session is NOT revived (still paused), and the run got a graceful
+    // isError tool_result instead of pushing model-controlled work into that repo.
+    expect(d.spine.getCodingSession(opSessionId)!.status).toBe("paused");
+    const run = d.listRuns({}).find((r) => r.sessionKey === "s1")!;
+    expect(run.status).toBe("completed");
+    const toolMsg = d.spine.getMessages("s1").find((m) => m.role === "tool");
+    expect(toolMsg?.content[0]).toMatchObject({ isError: true });
+    d.close();
+  });
+
+  it("recovers a coding session orphaned by a daemon restart: marks it process_lost and resumes the stranded run", async () => {
+    const dir = tmp();
+    const workDir = tmp();
+    const noopWatch = (_f: string, _on: () => void) => () => {};
+
+    // ── daemon 1 reaches awaiting_subwork with a running coding session ──
+    const d1 = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      codingTraceDir: join(dir, "traces"),
+      codingWatchHandbackFile: noopWatch,
+      router: new FakeRouter([
+        { stop: "tool_use", content: [{ type: "tool_use", id: "tool_1", name: "start_coding_session", input: { directory: workDir, task: "go" } }], usage: { inputTokens: 5, outputTokens: 2 } },
+      ]),
+      policy: new AllowPolicy(),
+      codingDriver: new FakeDriver(),
+    });
+    d1.registerAgent(agent);
+    await d1.submit({ sessionKey: "s1", agentId: "reef", message: "do the work" });
+    const run = d1.listRuns({}).find((r) => r.sessionKey === "s1")!;
+    expect(run.stopReason).toBe("awaiting_subwork");
+    const cs = d1.spine.findCodingSessionBySubwork(run.id, "tool_1")!;
+    expect(cs.status).toBe("running");
+
+    // ── simulate a CRASH: drop the db connection without a clean shutdown, so the
+    //    coding session stays `running` (close() would mark it cancelled) ──
+    d1.spine.close();
+
+    // ── daemon 2 on the same db has an empty live map → recover() must reconcile ──
+    const d2 = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      codingTraceDir: join(dir, "traces"),
+      codingWatchHandbackFile: noopWatch,
+      // one turn: after the lost subwork is committed as an error result, the run finishes.
+      router: new FakeRouter([
+        { stop: "completed", content: [{ type: "text", text: "the coding session was lost; reporting back" }], usage: { inputTokens: 4, outputTokens: 2 } },
+      ]),
+      policy: new AllowPolicy(),
+      codingDriver: new FakeDriver(),
+    });
+    d2.registerAgent(agent);
+
+    await d2.recover();
+
+    // the orphaned session is marked process_lost (not left running forever)
+    expect(d2.spine.getCodingSession(cs.id)!.status).toBe("process_lost");
+    // process_lost is lifecycle-ended → ended_at is stamped (consistency with terminal states)
+    expect(d2.spine.getCodingSession(cs.id)!.endedAt).toBeTruthy();
+    // and the stranded awaiting_subwork run is resumed to completion (not hung)
+    expect(d2.spine.getRun(run.id)!.status).toBe("completed");
+    // the agent received an isError tool_result for the interrupted subwork
+    const toolMsg = d2.spine.getMessages("s1").find((m) => m.role === "tool");
+    expect(toolMsg?.content[0]).toMatchObject({ isError: true });
+    d2.close();
   });
 
   it("cancel propagates to a coding session spawned by a suspended run", async () => {

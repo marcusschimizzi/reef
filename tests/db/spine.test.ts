@@ -26,6 +26,90 @@ const agent: AgentRecord = {
   toolAllowlist: ["echo"],
 };
 
+describe("Spine — batch-3 review fixes", () => {
+  it("listSuspendedRuns returns ALL suspended runs, unbounded (recovery must not page) — RF-07 seed", () => {
+    const spine = new Spine(tempDbPath());
+    spine.upsertAgent(agent);
+    spine.ensureSession("s1", agent.id);
+    for (let i = 0; i < 55; i++) {
+      spine.createRun({ id: `run_${i}`, agentId: agent.id, sessionKey: "s1", source: { kind: "trigger", triggerId: `t${i}`, triggerType: "schedule" } });
+      spine.setRunStatus(`run_${i}`, "suspended", { stopReason: "awaiting_approval" });
+    }
+    // the paged listRuns caps at its default 50 — recovery would silently drop 5
+    expect(spine.listRuns({ status: "suspended" }).length).toBe(50);
+    // the recovery seed must see every one
+    expect(spine.listSuspendedRuns().length).toBe(55);
+    spine.close();
+  });
+
+  it("a coding session records its owning agent, immutable across a spawning-run relink (finding #4 owner)", () => {
+    const spine = new Spine(tempDbPath());
+    spine.upsertAgent(agent);
+    spine.ensureSession("s1", agent.id);
+    spine.createRun({ id: "run_owner", agentId: agent.id, sessionKey: "s1" });
+    spine.createCodingSession({
+      id: "cs_1",
+      spawningRunId: "run_owner",
+      spawningToolUseId: "tool_1",
+      agentKind: "claude-code",
+      externalSessionId: "ext_1",
+      directory: "/tmp/x",
+      status: "running",
+      task: "t",
+      tracePath: "/tmp/cs_1.jsonl",
+    });
+    expect(spine.getCodingSession("cs_1")!.ownerAgentId).toBe(agent.id);
+
+    // an operator coding_feedback revive nulls the spawning link — the owner must NOT change
+    spine.relinkCodingSessionSubwork("cs_1", null, null);
+    expect(spine.getCodingSession("cs_1")!.ownerAgentId).toBe(agent.id);
+    spine.close();
+  });
+
+  it("the migration backfills owner_agent_id for legacy sessions, so an upgraded db's agent can still revive its own (PR #4 review finding)", () => {
+    const path = tempDbPath();
+    const spine = new Spine(path);
+    spine.upsertAgent(agent);
+    spine.ensureSession("s1", agent.id);
+    spine.createRun({ id: "run_owner", agentId: agent.id, sessionKey: "s1" });
+    // an agent-started session (has a spawning run) ...
+    spine.createCodingSession({
+      id: "cs_agent",
+      spawningRunId: "run_owner",
+      spawningToolUseId: "tool_1",
+      agentKind: "claude-code",
+      externalSessionId: "ext_1",
+      directory: "/tmp/x",
+      status: "paused",
+      task: "t",
+      tracePath: "/tmp/cs_agent.jsonl",
+    });
+    // ... and an operator-started session (no spawning run → genuinely unowned)
+    spine.createCodingSession({
+      id: "cs_operator",
+      spawningRunId: null,
+      spawningToolUseId: null,
+      agentKind: "claude-code",
+      externalSessionId: "ext_2",
+      directory: "/tmp/y",
+      status: "paused",
+      task: "t",
+      tracePath: "/tmp/cs_operator.jsonl",
+    });
+    // simulate a db created before owner_agent_id existed: the column ALTERs in as NULL
+    spine.connection.prepare(`UPDATE coding_sessions SET owner_agent_id = NULL`).run();
+    spine.close();
+
+    // re-open → the constructor re-runs the migration, which backfills the owner
+    const upgraded = new Spine(path);
+    // the agent-started session is re-attributed to its creator → guard passes, revivable
+    expect(upgraded.getCodingSession("cs_agent")!.ownerAgentId).toBe(agent.id);
+    // the operator-started session has no spawning run → stays unowned (agent revive still denied)
+    expect(upgraded.getCodingSession("cs_operator")!.ownerAgentId).toBeNull();
+    upgraded.close();
+  });
+});
+
 describe("Spine", () => {
   it("round-trips an agent record", () => {
     const spine = new Spine(tempDbPath());

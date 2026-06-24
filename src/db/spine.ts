@@ -12,6 +12,7 @@ import type {
   Message,
   Role,
   Run,
+  RunSource,
   RunStatus,
   SessionStatus,
   SessionSummary,
@@ -37,6 +38,11 @@ export interface CodingSessionRecord {
   id: string;
   spawningRunId: string | null;
   spawningToolUseId: string | null;
+  /** The reef agent that originally started this session — derived from the spawning
+   *  run at creation and NEVER changed by a relink (operator/agent revives rewrite
+   *  spawning_run_id). It's the stable basis for send_feedback ownership scoping.
+   *  Null for an operator-started session (no spawning run). */
+  ownerAgentId?: string | null;
   agentKind: string;
   externalSessionId: string;
   directory: string;
@@ -61,6 +67,8 @@ export interface CodingApprovalRecord {
   decision?: string;
   createdAt: string;
   decidedAt?: string;
+  /** Auto-deny deadline for a routed proactive coding approval (no inline human). */
+  expiresAt?: string;
 }
 
 // ── row shapes (as stored) ──────────────────────────────────────────────────
@@ -110,6 +118,7 @@ interface RunRow {
   parent_run_id: string | null;
   started_at: string;
   ended_at: string | null;
+  source: string | null;
 }
 interface StepRow {
   run_id: string;
@@ -331,6 +340,33 @@ export class Spine {
     }));
   }
 
+  /**
+   * Crash repair (RF-08): if a session's log ends with an assistant turn whose
+   * tool_use blocks were never answered (the daemon died after appending the turn but
+   * before the tool_result), append a synthetic error tool_result for each. Otherwise
+   * re-driving the run feeds the provider a tool_use with no matching tool_result and
+   * it 400s on every recovery — poisoning the session forever. Returns how many were
+   * closed (0 = nothing to repair). Only call for RUNNING interrupted runs: a
+   * suspended run's dangling tool_use is intentional (awaiting approval).
+   */
+  repairDanglingToolUses(sessionKey: string, runId?: string): number {
+    const messages = this.getMessages(sessionKey);
+    const last = messages[messages.length - 1];
+    if (!last || last.role !== "assistant") return 0;
+    const toolUses = last.content.filter(
+      (b): b is Extract<ContentBlock, { type: "tool_use" }> => b.type === "tool_use",
+    );
+    if (toolUses.length === 0) return 0;
+    const results: ContentBlock[] = toolUses.map((b) => ({
+      type: "tool_result",
+      toolUseId: b.id,
+      output: "This tool call was interrupted by a daemon restart and did not run.",
+      isError: true,
+    }));
+    this.appendMessage(sessionKey, "tool", results, runId);
+    return toolUses.length;
+  }
+
   /** Messages with seq > afterSeq, seq attached — what compaction cuts on. */
   getMessageEntries(sessionKey: string, afterSeq = 0): MessageEntry[] {
     const rows = this.db
@@ -409,12 +445,13 @@ export class Spine {
     agentId: string;
     sessionKey: string;
     parentRunId?: string;
+    source?: RunSource;
   }): Run {
     const startedAt = nowIso();
     this.db
       .prepare(
-        `INSERT INTO runs (id, agent_id, session_key, status, parent_run_id, started_at)
-         VALUES (?, ?, ?, 'running', ?, ?)`,
+        `INSERT INTO runs (id, agent_id, session_key, status, parent_run_id, started_at, source)
+         VALUES (?, ?, ?, 'running', ?, ?, ?)`,
       )
       .run(
         input.id,
@@ -422,6 +459,7 @@ export class Spine {
         input.sessionKey,
         input.parentRunId ?? null,
         startedAt,
+        input.source ? JSON.stringify(input.source) : null,
       );
     return {
       id: input.id,
@@ -430,6 +468,7 @@ export class Spine {
       status: "running",
       parentRunId: input.parentRunId,
       startedAt,
+      source: input.source,
     };
   }
 
@@ -476,6 +515,19 @@ export class Spine {
   getInterruptedRuns(): Run[] {
     const rows = this.db
       .prepare(`SELECT * FROM runs WHERE status = 'running'`)
+      .all() as RunRow[];
+    return rows.map(rowToRun);
+  }
+
+  /**
+   * EVERY suspended run, unbounded — for recovery's runMeta seed and the
+   * awaiting-approval view. Unlike `listRuns({status:"suspended"})` (paged, default
+   * 50), this must not silently drop runs: a dropped proactive run would lose its
+   * route-mode approval routing on resume and deadlock.
+   */
+  listSuspendedRuns(): Run[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM runs WHERE status = 'suspended' ORDER BY started_at DESC`)
       .all() as RunRow[];
     return rows.map(rowToRun);
   }
@@ -539,6 +591,26 @@ export class Spine {
       .prepare(`SELECT * FROM steps WHERE run_id = ? ORDER BY idx ASC`)
       .all(runId) as StepRow[];
     return rows.map(rowToStep);
+  }
+
+  /**
+   * The most recent committed step's usage for a whole SESSION (across all its runs)
+   * — the assembled-context size the provider last measured. Compaction triggers off
+   * this, not the current run's steps: a single-step (chat) run commits its one step
+   * only when it ends, so its own steps are empty at the loop top; the prior run's
+   * step is what tells us the context has grown past the threshold.
+   */
+  getLatestSessionStepUsage(sessionKey: string): Usage | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT s.usage AS usage FROM steps s
+           JOIN runs r ON r.id = s.run_id
+          WHERE r.session_key = ? AND s.state = 'committed' AND s.usage IS NOT NULL
+          ORDER BY s.committed_at DESC, s.idx DESC
+          LIMIT 1`,
+      )
+      .get(sessionKey) as { usage: string | null } | undefined;
+    return row?.usage ? (JSON.parse(row.usage) as Usage) : undefined;
   }
 
   /** Steps left pending when the daemon died — the in-flight model calls. */
@@ -777,14 +849,17 @@ export class Spine {
   }
 
   // ── coding sessions ───────────────────────────────────────────────────────
-  createCodingSession(rec: Omit<CodingSessionRecord, "createdAt" | "result" | "endedAt">): void {
+  createCodingSession(rec: Omit<CodingSessionRecord, "createdAt" | "result" | "endedAt" | "ownerAgentId">): void {
+    // Stamp the owning agent from the spawning run NOW — later relinks (revives)
+    // rewrite spawning_run_id, so the owner can't be re-derived from it afterward.
+    const ownerAgentId = rec.spawningRunId ? (this.getRun(rec.spawningRunId)?.agentId ?? null) : null;
     this.db
       .prepare(
         `INSERT INTO coding_sessions
-           (id, spawning_run_id, spawning_tool_use_id, agent_kind, external_session_id, directory, status, task, model, trace_path, created_at)
-         VALUES (@id, @spawningRunId, @spawningToolUseId, @agentKind, @externalSessionId, @directory, @status, @task, @model, @tracePath, @createdAt)`,
+           (id, spawning_run_id, spawning_tool_use_id, owner_agent_id, agent_kind, external_session_id, directory, status, task, model, trace_path, created_at)
+         VALUES (@id, @spawningRunId, @spawningToolUseId, @ownerAgentId, @agentKind, @externalSessionId, @directory, @status, @task, @model, @tracePath, @createdAt)`,
       )
-      .run({ ...rec, model: rec.model ?? null, createdAt: nowIso() });
+      .run({ ...rec, ownerAgentId, model: rec.model ?? null, createdAt: nowIso() });
   }
 
   /** Re-point a (paused) coding session at the run + tool_use that is reviving it,
@@ -810,7 +885,10 @@ export class Spine {
   }
 
   setCodingSessionStatus(id: string, status: string, result?: string): void {
-    const terminal = status === "completed" || status === "failed" || status === "cancelled";
+    // `process_lost` is lifecycle-ended (the PTY died) → stamp ended_at like the other
+    // terminal states. (`paused` is deliberately excluded — it's resumable, not ended.)
+    const terminal =
+      status === "completed" || status === "failed" || status === "cancelled" || status === "process_lost";
     this.db
       .prepare(
         `UPDATE coding_sessions
@@ -867,6 +945,23 @@ export class Spine {
       )
       .run(status, decision, nowIso(), id);
   }
+
+  /** Arm the auto-deny deadline on a routed proactive coding approval (no human to
+   *  answer it inline — the scheduler sweep denies it past this instant). */
+  setCodingApprovalExpiry(id: string, expiresAt: string): void {
+    this.db.prepare(`UPDATE coding_approvals SET expires_at = ? WHERE id = ?`).run(expiresAt, id);
+  }
+
+  /** Pending coding approvals whose auto-deny deadline has passed. */
+  getExpiredCodingApprovals(nowIso: string): CodingApprovalRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM coding_approvals
+         WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ?`,
+      )
+      .all(nowIso) as Record<string, unknown>[];
+    return rows.map(rowToCodingApproval);
+  }
 }
 
 /** Map a session's latest run to its list-view status. */
@@ -918,6 +1013,7 @@ function rowToRun(row: RunRow): Run {
     parentRunId: row.parent_run_id ?? undefined,
     startedAt: row.started_at,
     endedAt: row.ended_at ?? undefined,
+    source: row.source ? (JSON.parse(row.source) as RunSource) : undefined,
   };
 }
 
@@ -987,6 +1083,7 @@ function rowToCodingSession(row: Record<string, unknown>): CodingSessionRecord {
     id: row.id as string,
     spawningRunId: (row.spawning_run_id as string | null) ?? null,
     spawningToolUseId: (row.spawning_tool_use_id as string | null) ?? null,
+    ownerAgentId: (row.owner_agent_id as string | null) ?? null,
     agentKind: row.agent_kind as string,
     externalSessionId: row.external_session_id as string,
     directory: row.directory as string,
@@ -1012,5 +1109,6 @@ function rowToCodingApproval(row: Record<string, unknown>): CodingApprovalRecord
     decision: (row.decision as string | null) ?? undefined,
     createdAt: row.created_at as string,
     decidedAt: (row.decided_at as string | null) ?? undefined,
+    expiresAt: (row.expires_at as string | null) ?? undefined,
   };
 }

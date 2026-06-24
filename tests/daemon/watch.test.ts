@@ -91,6 +91,8 @@ describe("file-watch triggers (Phase 4d)", () => {
     const text = userMsg?.content.map((b) => (b.type === "text" ? b.text : "")).join("") ?? "";
     expect(text).toContain("Source changed");
     expect(text).toContain("main.ts");
+    // the filesystem-controlled path is wrapped as untrusted content (RF-22)
+    expect(text).toContain('<untrusted-content source="file-watch">');
 
     // run.started carries the watch source + the concrete event.
     const started = events.find((e) => e.type === "run.started");
