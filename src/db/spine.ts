@@ -56,6 +56,18 @@ export interface CodingSessionRecord {
   endedAt?: string;
 }
 
+/** A message parked while its session's run was suspended (see queued_messages DDL). */
+export interface QueuedMessage {
+  id: number;
+  sessionKey: string;
+  agentId: string;
+  text: string;
+  /** The originating wake's source (a trigger fire that arrived while parked),
+   *  so delivery runs under the right policy. Absent = interactive message. */
+  source?: RunSource;
+  createdAt: string;
+}
+
 export interface CodingApprovalRecord {
   id: string;
   codingSessionId: string;
@@ -530,6 +542,62 @@ export class Spine {
       .prepare(`SELECT * FROM runs WHERE status = 'suspended' ORDER BY started_at DESC`)
       .all() as RunRow[];
     return rows.map(rowToRun);
+  }
+
+  /** Whether the session's current run is parked (awaiting approval/subwork) — the
+   *  state in which a new user message must be queued, not appended (its last turn
+   *  is a deliberately dangling tool_use). */
+  hasSuspendedRun(sessionKey: string): boolean {
+    return (
+      this.db
+        .prepare(`SELECT 1 FROM runs WHERE session_key = ? AND status = 'suspended' LIMIT 1`)
+        .get(sessionKey) !== undefined
+    );
+  }
+
+  // ── queued messages (parked while the session's run was suspended) ──────────
+  enqueueQueuedMessage(q: {
+    sessionKey: string;
+    agentId: string;
+    text: string;
+    source?: RunSource;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO queued_messages (session_key, agent_id, text, source, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(q.sessionKey, q.agentId, q.text, q.source ? json(q.source) : null, nowIso());
+  }
+
+  /** The oldest parked message for a session (FIFO head), if any. */
+  nextQueuedMessage(sessionKey: string): QueuedMessage | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM queued_messages WHERE session_key = ? ORDER BY id ASC LIMIT 1`)
+      .get(sessionKey) as Record<string, unknown> | undefined;
+    return row ? rowToQueuedMessage(row) : undefined;
+  }
+
+  deleteQueuedMessage(id: number): void {
+    this.db.prepare(`DELETE FROM queued_messages WHERE id = ?`).run(id);
+  }
+
+  /** Sessions with parked messages — recovery drains the ones no longer suspended. */
+  queuedMessageSessions(): string[] {
+    const rows = this.db
+      .prepare(`SELECT DISTINCT session_key AS sk FROM queued_messages`)
+      .all() as Array<{ sk: string }>;
+    return rows.map((r) => r.sk);
+  }
+
+  /** Whether an identical instruction is already parked for the session — the
+   *  coalesce guard for a recurring trigger firing while its session is parked. */
+  hasQueuedMessage(sessionKey: string, text: string): boolean {
+    return (
+      this.db
+        .prepare(`SELECT 1 FROM queued_messages WHERE session_key = ? AND text = ? LIMIT 1`)
+        .get(sessionKey, text) !== undefined
+    );
   }
 
   // ── steps (the durable unit of progress) ───────────────────────────────────
@@ -1075,6 +1143,17 @@ function rowToStep(row: StepRow): Step {
     usage: parse<Usage>(row.usage),
     startedAt: row.started_at,
     committedAt: row.committed_at ?? undefined,
+  };
+}
+
+function rowToQueuedMessage(row: Record<string, unknown>): QueuedMessage {
+  return {
+    id: row.id as number,
+    sessionKey: row.session_key as string,
+    agentId: row.agent_id as string,
+    text: row.text as string,
+    source: row.source ? (JSON.parse(row.source as string) as RunSource) : undefined,
+    createdAt: row.created_at as string,
   };
 }
 

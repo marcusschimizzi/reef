@@ -123,7 +123,9 @@ type Job =
   | { kind: "resume"; runId: string }
   // `event` is set when a file-watch trigger fired (Phase 4d) — the change to
   // thread into the wake; absent for time-driven (schedule/heartbeat) fires.
-  | { kind: "trigger"; triggerId: string; event?: WatchEvent };
+  | { kind: "trigger"; triggerId: string; event?: WatchEvent }
+  // Deliver the oldest message parked while this session's run was suspended.
+  | { kind: "queued"; sessionKey: string };
 
 /**
  * The always-on agent runtime. Owns the spine (state), the router (model), the
@@ -155,6 +157,13 @@ export class Daemon {
   /** Abort handles for in-flight runs, keyed by session — powers cancellation. */
   private readonly aborters = new Map<string, AbortController>();
   private readonly coding: CodingSessionManager;
+  /** Set by close(): late async work (a drain scheduled behind a settling run)
+   *  must not touch the now-closed spine. */
+  private closed = false;
+  /** True while recover() drives runs directly (outside the serial inbox). A drain
+   *  kicked mid-recovery would start a delivery run the interrupted-run scan then
+   *  sees as `running` and re-drives concurrently — so drains wait for the end. */
+  private recovering = false;
 
   constructor(opts: DaemonOptions) {
     this.spine = new Spine(opts.dbPath);
@@ -287,7 +296,9 @@ export class Daemon {
     return this.sink.subscribe(fn);
   }
 
-  /** Enqueue a user-message wake; resolves when its run terminates or suspends. */
+  /** Enqueue a user-message wake; resolves when its run terminates or suspends —
+   *  or, if the session's current run is itself suspended, once the message has
+   *  been durably parked for delivery after that run settles (`message.queued`). */
   submit(wake: Wake): Promise<void> {
     return this.inbox.enqueue({ kind: "message", wake });
   }
@@ -345,27 +356,39 @@ export class Daemon {
    * returned here — they resume only when their approvals resolve.
    */
   async recover(): Promise<void> {
-    // Rebuild the in-memory run→source routing map from the durable record. A run
-    // suspended (awaiting approval/subwork) before the crash is NOT re-driven here — it
-    // resumes later when its approval resolves — and that resume path won't re-emit
-    // run.started, so without this seed routeApproval wouldn't know it's proactive.
-    for (const run of this.spine.listSuspendedRuns()) {
-      this.runMeta.set(run.id, { proactive: run.source?.kind === "trigger", agentId: run.agentId });
+    this.recovering = true;
+    try {
+      // Rebuild the in-memory run→source routing map from the durable record. A run
+      // suspended (awaiting approval/subwork) before the crash is NOT re-driven here — it
+      // resumes later when its approval resolves — and that resume path won't re-emit
+      // run.started, so without this seed routeApproval wouldn't know it's proactive.
+      for (const run of this.spine.listSuspendedRuns()) {
+        this.runMeta.set(run.id, { proactive: run.source?.kind === "trigger", agentId: run.agentId });
+      }
+      // A coding session left non-terminal by a crash has a dead PTY (its child process
+      // died with the daemon) but its row still says running, and its spawning run is
+      // parked `awaiting_subwork` — which getInterruptedRuns does NOT return, so it would
+      // hang forever. Reconcile those first: mark the session process_lost and resume the
+      // stranded run so it collects an (error) result and continues.
+      for (const runId of this.recoverCodingSessions()) {
+        await this.resumeRun(runId);
+      }
+      for (const run of this.spine.getInterruptedRuns()) {
+        // Close any tool_use the crash left unanswered before re-driving — otherwise the
+        // re-driven context ends with a tool_use lacking its tool_result and the provider
+        // 400s on every recovery attempt (RF-08).
+        this.spine.repairDanglingToolUses(run.sessionKey, run.id);
+        await this.runLoop(run);
+      }
+    } finally {
+      this.recovering = false;
     }
-    // A coding session left non-terminal by a crash has a dead PTY (its child process
-    // died with the daemon) but its row still says running, and its spawning run is
-    // parked `awaiting_subwork` — which getInterruptedRuns does NOT return, so it would
-    // hang forever. Reconcile those first: mark the session process_lost and resume the
-    // stranded run so it collects an (error) result and continues.
-    for (const runId of this.recoverCodingSessions()) {
-      await this.resumeRun(runId);
-    }
-    for (const run of this.spine.getInterruptedRuns()) {
-      // Close any tool_use the crash left unanswered before re-driving — otherwise the
-      // re-driven context ends with a tool_use lacking its tool_result and the provider
-      // 400s on every recovery attempt (RF-08).
-      this.spine.repairDanglingToolUses(run.sessionKey, run.id);
-      await this.runLoop(run);
+    // Messages parked while a session was suspended and not yet delivered when the
+    // daemon went down: schedule delivery for any session that is free again. Done
+    // only now — a drain mid-recovery would start a delivery run the interrupted-run
+    // scan above then double-drives (it reads status 'running' from the spine).
+    for (const sessionKey of this.spine.queuedMessageSessions()) {
+      this.drainQueuedMessages(sessionKey);
     }
   }
 
@@ -449,6 +472,7 @@ export class Daemon {
   }
 
   close(): void {
+    this.closed = true;
     this.scheduler.stop();
     this.watcher.stop();
     this.coding.close(); // kill live coding sessions + close their traces before the spine
@@ -685,10 +709,35 @@ export class Daemon {
   private async processJob(job: Job): Promise<void> {
     if (job.kind === "message") return this.processWake(job.wake);
     if (job.kind === "trigger") return this.processTrigger(job.triggerId, job.event);
+    if (job.kind === "queued") return this.processQueued(job.sessionKey);
     return this.resumeRun(job.runId);
   }
 
   private async processWake(wake: Wake): Promise<void> {
+    // A suspended run's last turn is a deliberately dangling tool_use awaiting its
+    // tool_result (approval or subwork). Appending a user message there would wedge
+    // the session: every later model call 400s on the unanswered tool_use. Park the
+    // message durably instead; it's delivered as its own run once the session frees up.
+    if (this.spine.hasSuspendedRun(wake.sessionKey)) {
+      this.spine.enqueueQueuedMessage({
+        sessionKey: wake.sessionKey,
+        agentId: wake.agentId,
+        text: wake.message,
+      });
+      this.sink.emit({
+        type: "message.queued",
+        text: wake.message,
+        sessionKey: wake.sessionKey,
+        runId: "",
+      });
+      return;
+    }
+    await this.startMessageRun(wake);
+  }
+
+  /** Append the wake's message, mint a run, and drive the loop — the shared tail
+   *  of every text wake (user message, trigger fire, queued delivery). */
+  private async startMessageRun(wake: Wake, source?: RunSource): Promise<void> {
     // Snapshot the current default model onto a new session so it sticks.
     this.spine.ensureSession(wake.sessionKey, wake.agentId, this.spine.getAgent(wake.agentId)?.model);
     this.spine.appendMessage(wake.sessionKey, "user", [
@@ -698,15 +747,42 @@ export class Daemon {
       id: newRunId(),
       agentId: wake.agentId,
       sessionKey: wake.sessionKey,
-      source: { kind: "message" },
+      source: source ?? { kind: "message" },
     });
     this.sink.emit({
       type: "message.received",
       text: wake.message,
+      ...(source ? { source } : {}),
       sessionKey: wake.sessionKey,
       runId: run.id,
     });
-    await this.runLoop(run);
+    await this.runLoop(run, source ? { source } : {});
+  }
+
+  /** Deliver the oldest parked message for a session, if it is free again. The
+   *  delivery is one-at-a-time: this run's completion schedules the next drain,
+   *  preserving FIFO even if a delivery re-suspends the session. */
+  private async processQueued(sessionKey: string): Promise<void> {
+    // Re-check at delivery time — an earlier inbox job may have re-suspended the
+    // session. The row stays parked; a later drain picks it up.
+    if (this.spine.hasSuspendedRun(sessionKey)) return;
+    const q = this.spine.nextQueuedMessage(sessionKey);
+    if (!q) return;
+    this.spine.deleteQueuedMessage(q.id);
+    await this.startMessageRun(
+      { sessionKey: q.sessionKey, agentId: q.agentId, message: q.text },
+      q.source,
+    );
+  }
+
+  /** If the session is free and has parked messages, schedule delivery of the
+   *  oldest (its own run completion schedules the next). */
+  private drainQueuedMessages(sessionKey: string): void {
+    if (this.closed) return; // shutting down — the rows persist; recovery drains them
+    if (this.recovering) return; // recover() drains everything once its direct drives finish
+    if (this.spine.hasSuspendedRun(sessionKey)) return;
+    if (!this.spine.nextQueuedMessage(sessionKey)) return;
+    void this.inbox.enqueue({ kind: "queued", sessionKey });
   }
 
   /** A trigger fired: seed its configured instruction as the wake and run, on
@@ -716,37 +792,43 @@ export class Daemon {
   private async processTrigger(triggerId: string, event?: WatchEvent): Promise<void> {
     const trigger = this.spine.getTrigger(triggerId);
     if (!trigger || !trigger.enabled) return;
-    this.spine.ensureSession(
-      trigger.sessionKey,
-      trigger.agentId,
-      this.spine.getAgent(trigger.agentId)?.model,
-    );
     // The file path is filesystem-controlled (an attacker can name a file with
     // injection text), so the change description crosses the trust boundary — wrap it.
     const text = event
       ? `${trigger.input}\n\n${wrapUntrusted(`file event: ${event.type} at ${event.path}`, "file-watch")}`
       : trigger.input;
-    this.spine.appendMessage(trigger.sessionKey, "user", [{ type: "text", text }]);
     const source: RunSource = {
       kind: "trigger",
       triggerId: trigger.id,
       triggerType: trigger.type,
       ...(event ? { event } : {}),
     };
-    const run = this.spine.createRun({
-      id: newRunId(),
-      agentId: trigger.agentId,
-      sessionKey: trigger.sessionKey,
+    // A trigger session whose run is parked (e.g. a proactive run awaiting subwork)
+    // has the same dangling-tool_use hazard as a user message — park the fire.
+    // Coalesce: a recurring trigger re-firing while parked shouldn't pile up
+    // identical wakes; one pending copy of the instruction is enough.
+    if (this.spine.hasSuspendedRun(trigger.sessionKey)) {
+      if (!this.spine.hasQueuedMessage(trigger.sessionKey, text)) {
+        this.spine.enqueueQueuedMessage({
+          sessionKey: trigger.sessionKey,
+          agentId: trigger.agentId,
+          text,
+          source,
+        });
+        this.sink.emit({
+          type: "message.queued",
+          text,
+          source,
+          sessionKey: trigger.sessionKey,
+          runId: "",
+        });
+      }
+      return;
+    }
+    await this.startMessageRun(
+      { sessionKey: trigger.sessionKey, agentId: trigger.agentId, message: text },
       source,
-    });
-    this.sink.emit({
-      type: "message.received",
-      text,
-      source,
-      sessionKey: trigger.sessionKey,
-      runId: run.id,
-    });
-    await this.runLoop(run, { source });
+    );
   }
 
   private async resumeRun(runId: string): Promise<void> {
@@ -754,8 +836,12 @@ export class Daemon {
     // Only a still-suspended run resumes. A resume job for a run that already
     // reached a terminal state (e.g. cancel marked it completed before the
     // post-kill coding.session.completed enqueued this resume) is a no-op,
-    // rather than re-driving the subwork preamble and re-parking it forever.
-    if (!run || run.status !== "suspended") return;
+    // rather than re-driving the subwork preamble and re-parking it forever —
+    // but messages parked behind that (now settled) run still need delivering.
+    if (!run || run.status !== "suspended") {
+      if (run) this.drainQueuedMessages(run.sessionKey);
+      return;
+    }
     this.spine.setRunStatus(runId, "running");
     await this.runLoop({ ...run, status: "running" }, { resumeApproval: true });
   }
@@ -863,5 +949,8 @@ export class Daemon {
     } finally {
       this.aborters.delete(run.sessionKey);
     }
+    // The run settled (or re-suspended — the drain guards on that): deliver the
+    // oldest message parked while the session was suspended, if any.
+    this.drainQueuedMessages(run.sessionKey);
   }
 }

@@ -448,6 +448,111 @@ describe("Daemon coding-session control", () => {
     d2.close();
   });
 
+  it("a message to a session parked awaiting_subwork is queued, not appended — and delivers after the run resumes", async () => {
+    const dir = tmp();
+    const workDir = tmp();
+    const driver = new FakeDriver();
+    const daemon = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      codingTraceDir: join(dir, "traces"),
+      codingWatchHandbackFile: (_f: string, _on: () => void) => () => {},
+      router: new FakeRouter([
+        { stop: "tool_use", content: [{ type: "tool_use", id: "tool_1", name: "start_coding_session", input: { directory: workDir, task: "go" } }], usage: { inputTokens: 5, outputTokens: 2 } },
+        { stop: "completed", content: [{ type: "text", text: "subwork done, continuing" }], usage: { inputTokens: 8, outputTokens: 2 } },
+        { stop: "completed", content: [{ type: "text", text: "answering your queued message" }], usage: { inputTokens: 4, outputTokens: 2 } },
+      ]),
+      policy: new AllowPolicy(),
+      codingDriver: driver,
+    });
+    daemon.registerAgent(agent);
+
+    await daemon.submit({ sessionKey: "s1", agentId: "reef", message: "do the work" });
+    const run = daemon.listRuns({}).find((r) => r.sessionKey === "s1")!;
+    expect(run.stopReason).toBe("awaiting_subwork");
+
+    // Chat with the session while it's parked. The suspended turn's last message is
+    // a deliberately dangling tool_use awaiting its tool_result — appending a user
+    // message there makes every later model call 400, poisoning the session forever.
+    await daemon.submit({ sessionKey: "s1", agentId: "reef", message: "also, use bun please" });
+    expect(daemon.listRuns({}).filter((r) => r.sessionKey === "s1")).toHaveLength(1);
+    expect(JSON.stringify(daemon.spine.getMessages("s1"))).not.toContain("use bun");
+
+    // Subwork completes → the parked run resumes and finishes → the queued message
+    // is delivered as its own run afterwards.
+    const queuedRunDone = new Promise<void>((resolve) => {
+      const off = daemon.subscribe((e: ReefEvent) => {
+        if (e.type === "run.completed" && e.sessionKey === "s1" && e.runId !== run.id) { off(); resolve(); }
+      });
+    });
+    driver.handle.die(0);
+    await queuedRunDone;
+
+    const runs = daemon.listRuns({}).filter((r) => r.sessionKey === "s1");
+    expect(runs).toHaveLength(2);
+    expect(runs.every((r) => r.status === "completed")).toBe(true);
+    // The transcript stays provider-valid: every tool_use is answered by the
+    // immediately following tool message, and the queued text lands after it.
+    const messages = daemon.spine.getMessages("s1");
+    for (let i = 0; i < messages.length; i++) {
+      if (messages[i]!.role === "assistant" && messages[i]!.content.some((b) => b.type === "tool_use")) {
+        expect(messages[i + 1]?.role).toBe("tool");
+      }
+    }
+    const bunIdx = messages.findIndex((m) => JSON.stringify(m.content).includes("use bun"));
+    const toolIdx = messages.findIndex((m) => m.role === "tool");
+    expect(bunIdx).toBeGreaterThan(toolIdx);
+    daemon.close();
+  });
+
+  it("a queued message survives a restart and delivers after recovery resumes the stranded run", async () => {
+    const dir = tmp();
+    const workDir = tmp();
+    const noopWatch = (_f: string, _on: () => void) => () => {};
+
+    // ── daemon 1: park awaiting_subwork, then a message arrives (queued) ──
+    const d1 = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      codingTraceDir: join(dir, "traces"),
+      codingWatchHandbackFile: noopWatch,
+      router: new FakeRouter([
+        { stop: "tool_use", content: [{ type: "tool_use", id: "tool_1", name: "start_coding_session", input: { directory: workDir, task: "go" } }], usage: { inputTokens: 5, outputTokens: 2 } },
+      ]),
+      policy: new AllowPolicy(),
+      codingDriver: new FakeDriver(),
+    });
+    d1.registerAgent(agent);
+    await d1.submit({ sessionKey: "s1", agentId: "reef", message: "do the work" });
+    await d1.submit({ sessionKey: "s1", agentId: "reef", message: "remember to run the tests" });
+    d1.close();
+
+    // ── daemon 2: recovery resumes the stranded run, then delivers the parked message ──
+    const d2 = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      codingTraceDir: join(dir, "traces"),
+      codingWatchHandbackFile: noopWatch,
+      router: new FakeRouter([
+        { stop: "completed", content: [{ type: "text", text: "the session was interrupted; reporting back" }], usage: { inputTokens: 4, outputTokens: 2 } },
+        { stop: "completed", content: [{ type: "text", text: "on it — running the tests" }], usage: { inputTokens: 4, outputTokens: 2 } },
+      ]),
+      policy: new AllowPolicy(),
+      codingDriver: new FakeDriver(),
+    });
+    d2.registerAgent(agent);
+    await d2.recover();
+    // The delivery job rides the serial inbox; a marker submit drains behind it.
+    // (Its own run rejects — the router is out of turns — which is expected.)
+    await d2.submit({ sessionKey: "marker", agentId: "reef", message: "drain" }).catch(() => undefined);
+
+    const runs = d2.listRuns({}).filter((r) => r.sessionKey === "s1");
+    expect(runs).toHaveLength(2);
+    expect(runs.every((r) => r.status === "completed")).toBe(true);
+    expect(JSON.stringify(d2.spine.getMessages("s1"))).toContain("remember to run the tests");
+    d2.close();
+  });
+
   it("clean shutdown mid-subwork: the session survives as process_lost and the stranded run resumes on recovery", async () => {
     const dir = tmp();
     const workDir = tmp();

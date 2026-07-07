@@ -177,6 +177,50 @@ describe("Daemon", () => {
     daemon.close();
   });
 
+  it("a message to a session awaiting approval is queued and delivers after the approval resolves", async () => {
+    const dir = tempDir();
+    const gatedAgent: AgentRecord = { ...agent, toolAllowlist: ["shell"] };
+    const daemon = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      router: new FakeRouter([
+        {
+          stop: "tool_use",
+          content: [{ type: "tool_use", id: "t1", name: "shell", input: { command: "echo hi" } }],
+          usage: { inputTokens: 5, outputTokens: 2 },
+        },
+        { stop: "completed", content: [{ type: "text", text: "command done" }], usage: { inputTokens: 6, outputTokens: 2 } },
+        { stop: "completed", content: [{ type: "text", text: "answering your queued message" }], usage: { inputTokens: 4, outputTokens: 2 } },
+      ]),
+    });
+    daemon.registerAgent(gatedAgent);
+
+    await daemon.submit({ sessionKey: "s1", agentId: "reef", message: "run a command" });
+    const run = daemon.listRuns({}).find((r) => r.sessionKey === "s1")!;
+    expect(run.stopReason).toBe("awaiting_approval");
+
+    // A message while suspended must not be appended after the dangling tool_use.
+    await daemon.submit({ sessionKey: "s1", agentId: "reef", message: "afterwards, also say hello" });
+    expect(daemon.listRuns({}).filter((r) => r.sessionKey === "s1")).toHaveLength(1);
+    expect(JSON.stringify(daemon.spine.getMessages("s1"))).not.toContain("say hello");
+
+    // Resolving the approval resumes the run; the queued message follows as its own run.
+    const queuedRunDone = new Promise<void>((resolve) => {
+      const off = daemon.subscribe((e: ReefEvent) => {
+        if (e.type === "run.completed" && e.sessionKey === "s1" && e.runId !== run.id) { off(); resolve(); }
+      });
+    });
+    const approvalId = daemon.runsAwaitingApproval()[0]!.approvals[0]!.id;
+    daemon.resolveApproval(approvalId, "allow-once");
+    await queuedRunDone;
+
+    const runs = daemon.listRuns({}).filter((r) => r.sessionKey === "s1");
+    expect(runs).toHaveLength(2);
+    expect(runs.every((r) => r.status === "completed")).toBe(true);
+    expect(JSON.stringify(daemon.spine.getMessages("s1"))).toContain("say hello");
+    daemon.close();
+  });
+
   it("a recovered proactive run still auto-denies gated tools (durable RunSource, RF-07)", async () => {
     const dir = tempDir();
     const dbPath = join(dir, "reef.db");

@@ -62,6 +62,11 @@ export type ReefEvent = EventEnvelope &
     // (the canonical user turn lives in `messages`, but the event log is what
     // consumers replay). conch drops it: it renders the user's own input.
     | { type: "message.received"; text: string; source?: RunSource }
+    // A message that arrived while the session's run was suspended (awaiting an
+    // approval or subwork): parked durably rather than appended after the turn's
+    // dangling tool_use, and delivered as its own run once the session is free.
+    // Carries an empty runId — no run exists for it yet.
+    | { type: "message.queued"; text: string; source?: RunSource }
     | { type: "message.delta"; text: string }
     | { type: "thinking.delta"; text: string }
     | { type: "message.completed"; content: ContentBlock[] }
