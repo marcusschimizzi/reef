@@ -97,6 +97,10 @@ export class CodingSessionManager {
   private readonly idleMs: number;
   private readonly startupMs: number;
   private readonly proactiveApprovalTimeoutMs: number;
+  /** Set by close(): the shutdown already recorded each session's terminal status,
+   *  so a straggling PTY exit handler must not re-record (e.g. `failed` over the
+   *  shutdown's `process_lost`). */
+  private closed = false;
   constructor(private readonly deps: CodingSessionManagerDeps) {
     this.idleMs = deps.idleMs ?? (Number(process.env.REEF_CODING_IDLE_MS) || 300_000);
     this.startupMs = deps.startupMs ?? (Number(process.env.REEF_CODING_STARTUP_MS) || 60_000);
@@ -230,6 +234,7 @@ export class CodingSessionManager {
       for (const ev of processor.push(chunk)) this.onDriverEvent(id, ev);
     });
     handle.onExit((code) => {
+      if (this.closed) return; // shutdown already recorded the status + closed the trace
       trace.write({ type: "lifecycle", event: "exit", code });
       if (this.handingBack.delete(id)) {
         // Deliberate handback: the PTY has now exited and the transcript is flushed,
@@ -291,15 +296,21 @@ export class CodingSessionManager {
     this.live.get(id)!.handle.kill();
   }
 
-  /** Shut down: kill every live session, mark it cancelled, and close its trace.
-   *  Called on daemon shutdown so no PTY or trace fd is leaked. Idempotent trace
-   *  close means the async exit handler firing afterward is harmless. */
+  /** Shut down: kill every live session, mark it process_lost, and close its trace.
+   *  Called on daemon shutdown so no PTY or trace fd is leaked. `process_lost` (not
+   *  `cancelled`): nobody cancelled the work — the daemon is going down. It keeps the
+   *  session revivable via --resume and lets recovery resume the stranded spawning
+   *  run on the next boot, exactly like the crash path. The `closed` latch makes a
+   *  late exit handler a no-op so it can't overwrite the recorded status. */
   close(): void {
+    this.closed = true;
     for (const [id, l] of this.live) {
       this.disarmIdle(id);
       this.clearWatch(id);
-      this.cancelling.add(id);
-      this.deps.spine.setCodingSessionStatus(id, "cancelled");
+      const diag =
+        `The coding session (${id}) was interrupted by a daemon shutdown — its process was ` +
+        `stopped. It can be revived from where it left off with send_feedback("${id}", "<how to continue>").`;
+      this.deps.spine.setCodingSessionStatus(id, "process_lost", diag);
       l.handle.kill();
       l.trace.close();
     }

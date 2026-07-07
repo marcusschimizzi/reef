@@ -103,13 +103,16 @@ const MISSED_GRACE_MS = 90_000;
 
 // Coding-session statuses that are terminal from the spawning run's point of view:
 // the run can collect a result and continue. `paused` = handed back (resumable);
-// `process_lost` = the PTY died (crash) — a resumable failure. The non-terminal ones
-// (running, awaiting_decision) mean the increment is still in flight.
+// `process_lost` = the PTY died (crash/shutdown) — a resumable failure; `cancelled` =
+// deliberately stopped (a failed-shaped result, else the operator cancelling a session
+// would re-park its spawning run forever). The non-terminal ones (running,
+// awaiting_decision) mean the increment is still in flight.
 const TERMINAL_CODING_STATUSES: ReadonlySet<string> = new Set([
   "completed",
   "failed",
   "paused",
   "process_lost",
+  "cancelled",
 ]);
 
 // Everything the agent might wake for funnels into one serial inbox: a user
@@ -367,23 +370,31 @@ export class Daemon {
   }
 
   /** Mark coding sessions orphaned by a crash as `process_lost` (the daemon just
-   *  started, so nothing is live — any still-running row is dead). Returns the
-   *  spawning run ids parked `awaiting_subwork` that need resuming. */
+   *  started, so nothing is live — any still-running row is dead), then collect the
+   *  spawning runs still parked `awaiting_subwork` whose session is already terminal
+   *  — the crash-flipped ones, plus sessions a clean shutdown marked process_lost or
+   *  a crash caught between handback and resume. Returns the run ids to resume. */
   private recoverCodingSessions(): string[] {
-    const toResume: string[] = [];
+    const toResume = new Set<string>();
     for (const cs of this.spine.listCodingSessions()) {
-      if (cs.status !== "running" && cs.status !== "awaiting_decision") continue;
-      const diag =
-        `The coding session (${cs.id}) was interrupted by a daemon restart — its process did not ` +
-        `survive (status before the restart: ${cs.status}). It can be revived from where it left off ` +
-        `with send_feedback("${cs.id}", "<how to continue>").`;
-      this.spine.setCodingSessionStatus(cs.id, "process_lost", diag);
-      if (cs.spawningRunId) {
-        const run = this.spine.getRun(cs.spawningRunId);
-        if (run?.status === "suspended") toResume.push(cs.spawningRunId);
+      let status = cs.status;
+      if (status === "running" || status === "awaiting_decision") {
+        const diag =
+          `The coding session (${cs.id}) was interrupted by a daemon restart — its process did not ` +
+          `survive (status before the restart: ${cs.status}). It can be revived from where it left off ` +
+          `with send_feedback("${cs.id}", "<how to continue>").`;
+        this.spine.setCodingSessionStatus(cs.id, "process_lost", diag);
+        status = "process_lost";
+      }
+      if (!TERMINAL_CODING_STATUSES.has(status) || !cs.spawningRunId) continue;
+      const run = this.spine.getRun(cs.spawningRunId);
+      // Only an awaiting_subwork park is this session's strand; a run suspended
+      // awaiting_approval is parked for a human and must stay parked.
+      if (run?.status === "suspended" && run.stopReason === "awaiting_subwork") {
+        toResume.add(cs.spawningRunId);
       }
     }
-    return toResume;
+    return [...toResume];
   }
 
   /** Cancel the in-flight run for a session (reef-docs/03 cancellation). Also
@@ -832,15 +843,16 @@ export class Daemon {
           collectSubwork: (runId, toolUseId) => {
             const cs = this.spine.findCodingSessionBySubwork(runId, toolUseId);
             // `paused` = handed back (increment done, resumable); `process_lost` = the
-            // PTY died (crash recovery) — both are completable results for the manager
-            // run, like completed/failed. process_lost is failed-shaped (isError).
+            // PTY died (crash/shutdown); `cancelled` = deliberately stopped — all are
+            // completable results for the manager run, like completed/failed.
+            // process_lost and cancelled are failed-shaped (isError).
             if (!cs || !TERMINAL_CODING_STATUSES.has(cs.status)) return undefined;
             return {
               // The increment summary is a supervised sub-agent's output (scraped from
               // the repo it read) re-entering this tool-holding parent run — wrap it so
               // the parent treats it as data, not instructions (RF-22, sharpest case).
               result: wrapUntrusted(cs.result ?? `coding session ${cs.id} ${cs.status}`, "coding-session"),
-              failed: cs.status === "failed" || cs.status === "process_lost",
+              failed: cs.status === "failed" || cs.status === "process_lost" || cs.status === "cancelled",
               sessionId: cs.id,
               status: cs.status,
             };

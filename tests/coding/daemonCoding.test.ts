@@ -416,7 +416,7 @@ describe("Daemon coding-session control", () => {
     expect(cs.status).toBe("running");
 
     // ── simulate a CRASH: drop the db connection without a clean shutdown, so the
-    //    coding session stays `running` (close() would mark it cancelled) ──
+    //    coding session stays `running` (close() would mark it process_lost) ──
     d1.spine.close();
 
     // ── daemon 2 on the same db has an empty live map → recover() must reconcile ──
@@ -446,6 +446,81 @@ describe("Daemon coding-session control", () => {
     const toolMsg = d2.spine.getMessages("s1").find((m) => m.role === "tool");
     expect(toolMsg?.content[0]).toMatchObject({ isError: true });
     d2.close();
+  });
+
+  it("clean shutdown mid-subwork: the session survives as process_lost and the stranded run resumes on recovery", async () => {
+    const dir = tmp();
+    const workDir = tmp();
+    const noopWatch = (_f: string, _on: () => void) => () => {};
+
+    // ── daemon 1 reaches awaiting_subwork with a running coding session ──
+    const d1 = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      codingTraceDir: join(dir, "traces"),
+      codingWatchHandbackFile: noopWatch,
+      router: new FakeRouter([
+        { stop: "tool_use", content: [{ type: "tool_use", id: "tool_1", name: "start_coding_session", input: { directory: workDir, task: "go" } }], usage: { inputTokens: 5, outputTokens: 2 } },
+      ]),
+      policy: new AllowPolicy(),
+      codingDriver: new FakeDriver(),
+    });
+    d1.registerAgent(agent);
+    await d1.submit({ sessionKey: "s1", agentId: "reef", message: "do the work" });
+    const run = d1.listRuns({}).find((r) => r.sessionKey === "s1")!;
+    expect(run.stopReason).toBe("awaiting_subwork");
+    const cs = d1.spine.findCodingSessionBySubwork(run.id, "tool_1")!;
+    expect(cs.status).toBe("running");
+
+    // ── CLEAN shutdown (not a crash): close() kills the PTY. The session must be
+    //    recorded process_lost (revivable via --resume), not a dead-end status the
+    //    recovery pass ignores — otherwise the spawning run hangs forever. ──
+    d1.close();
+
+    // ── daemon 2 on the same db: recovery must resume the stranded run ──
+    const d2 = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      codingTraceDir: join(dir, "traces"),
+      codingWatchHandbackFile: noopWatch,
+      router: new FakeRouter([
+        { stop: "completed", content: [{ type: "text", text: "the coding session was interrupted; reporting back" }], usage: { inputTokens: 4, outputTokens: 2 } },
+      ]),
+      policy: new AllowPolicy(),
+      codingDriver: new FakeDriver(),
+    });
+    d2.registerAgent(agent);
+    await d2.recover();
+
+    expect(d2.spine.getCodingSession(cs.id)!.status).toBe("process_lost");
+    expect(d2.spine.getRun(run.id)!.status).toBe("completed");
+    const toolMsg = d2.spine.getMessages("s1").find((m) => m.role === "tool");
+    expect(toolMsg?.content[0]).toMatchObject({ isError: true });
+    d2.close();
+  });
+
+  it("cancelCodingSession on an agent-spawned session resumes the run with an isError result instead of re-parking it", async () => {
+    const { daemon, driver } = setup();
+
+    await daemon.submit({ sessionKey: "s1", agentId: "reef", message: "do the work" });
+    const run = daemon.listRuns({}).find((r) => r.sessionKey === "s1")!;
+    expect(run.stopReason).toBe("awaiting_subwork");
+    const cs = daemon.spine.findCodingSessionBySubwork(run.id, "tool_1")!;
+
+    // Operator cancels the SESSION directly (socket coding_cancel path) — unlike
+    // daemon.cancel(sessionKey), nothing pre-finalizes the spawning run, so the
+    // post-kill resume must collect a `cancelled` result rather than re-park.
+    const settled = whenRunSettles(daemon, run.id);
+    daemon.cancelCodingSession(cs.id);
+    driver.handle.die(143); // the kill exits the PTY
+    await settled;
+
+    expect(daemon.spine.getCodingSession(cs.id)!.status).toBe("cancelled");
+    const after = daemon.spine.getRun(run.id)!;
+    expect(after.status).toBe("completed");
+    const toolMsg = daemon.spine.getMessages("s1").find((m) => m.role === "tool");
+    expect(toolMsg?.content[0]).toMatchObject({ isError: true });
+    daemon.close();
   });
 
   it("cancel propagates to a coding session spawned by a suspended run", async () => {
