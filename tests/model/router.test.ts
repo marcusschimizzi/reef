@@ -43,6 +43,26 @@ describe("VercelRouter", () => {
     ).rejects.toThrow(/Overloaded: the provider returned 529/);
   });
 
+  it("stringifies a non-Error stream error meaningfully (not '[object Object]')", async () => {
+    const model = new MockLanguageModelV3({
+      doStream: async () => ({
+        stream: convertArrayToReadableStream([
+          { type: "stream-start", warnings: [] },
+          { type: "error", error: { status: 529, message: "overloaded" } },
+        ]),
+      }),
+    });
+    const router = new VercelRouter([], undefined, new FakeRegistry(model));
+
+    await expect(
+      router.generateTurn({
+        model: "anthropic/claude-x",
+        system: "be helpful",
+        messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      }),
+    ).rejects.toThrow(/529/);
+  });
+
   it("streams text deltas and maps content, stop, and usage on the happy path", async () => {
     const model = new MockLanguageModelV3({
       doStream: async () => ({

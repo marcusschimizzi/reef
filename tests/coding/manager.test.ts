@@ -236,6 +236,10 @@ describe("CodingSessionManager", () => {
     const cs = spine.getCodingSession(id)!;
     expect(cs.status).toBe("process_lost");
     expect(cs.result).toContain("send_feedback");
+    // The trace must record WHY it ended — the latched exit handler no longer
+    // writes the exit record, so close() itself marks the shutdown.
+    const trace = readFileSync(cs.tracePath, "utf8");
+    expect(trace).toContain('"shutdown"');
     // The PTY exit racing shutdown must not re-record (e.g. `failed` over this).
     driver.handle.die(137);
     expect(spine.getCodingSession(id)!.status).toBe("process_lost");

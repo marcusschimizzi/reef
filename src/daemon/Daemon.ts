@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { newRunId, newTriggerId } from "../core/ids.js";
-import { CodingSessionManager } from "../coding/manager.js";
+import { CodingSessionManager, interruptedSessionDiag } from "../coding/manager.js";
 import { PtyClaudeDriver } from "../coding/ptyClaude.js";
 import type { CodingAgentDriver } from "../coding/driver.js";
 import { nowIso } from "../core/time.js";
@@ -373,6 +373,17 @@ export class Daemon {
       for (const runId of this.recoverCodingSessions()) {
         await this.resumeRun(runId);
       }
+      // An approval resolved durably whose in-memory resume job died with the
+      // daemon leaves a run suspended with zero pending approvals — finish it now,
+      // or it hangs forever and the session parks every future message behind it.
+      for (const run of this.spine.listSuspendedRuns()) {
+        if (
+          run.stopReason === "awaiting_approval" &&
+          this.spine.pendingApprovalCount(run.id) === 0
+        ) {
+          await this.resumeRun(run.id);
+        }
+      }
       for (const run of this.spine.getInterruptedRuns()) {
         // Close any tool_use the crash left unanswered before re-driving — otherwise the
         // re-driven context ends with a tool_use lacking its tool_result and the provider
@@ -393,29 +404,29 @@ export class Daemon {
   }
 
   /** Mark coding sessions orphaned by a crash as `process_lost` (the daemon just
-   *  started, so nothing is live — any still-running row is dead), then collect the
+   *  started, so nothing is live — any still-live row is dead), then collect the
    *  spawning runs still parked `awaiting_subwork` whose session is already terminal
    *  — the crash-flipped ones, plus sessions a clean shutdown marked process_lost or
-   *  a crash caught between handback and resume. Returns the run ids to resume. */
+   *  a crash caught between handback and resume. Scans the (small) live-session and
+   *  suspended-run sets, not the unbounded terminal-session history. */
   private recoverCodingSessions(): string[] {
+    for (const cs of this.spine.listNonTerminalCodingSessions()) {
+      this.spine.setCodingSessionStatus(
+        cs.id,
+        "process_lost",
+        interruptedSessionDiag(
+          cs.id,
+          `a daemon restart — its process did not survive (status before the restart: ${cs.status})`,
+        ),
+      );
+    }
     const toResume = new Set<string>();
-    for (const cs of this.spine.listCodingSessions()) {
-      let status = cs.status;
-      if (status === "running" || status === "awaiting_decision") {
-        const diag =
-          `The coding session (${cs.id}) was interrupted by a daemon restart — its process did not ` +
-          `survive (status before the restart: ${cs.status}). It can be revived from where it left off ` +
-          `with send_feedback("${cs.id}", "<how to continue>").`;
-        this.spine.setCodingSessionStatus(cs.id, "process_lost", diag);
-        status = "process_lost";
-      }
-      if (!TERMINAL_CODING_STATUSES.has(status) || !cs.spawningRunId) continue;
-      const run = this.spine.getRun(cs.spawningRunId);
-      // Only an awaiting_subwork park is this session's strand; a run suspended
+    for (const run of this.spine.listSuspendedRuns()) {
+      // Only an awaiting_subwork park is a coding-session strand; a run suspended
       // awaiting_approval is parked for a human and must stay parked.
-      if (run?.status === "suspended" && run.stopReason === "awaiting_subwork") {
-        toResume.add(cs.spawningRunId);
-      }
+      if (run.stopReason !== "awaiting_subwork") continue;
+      const linked = this.spine.listCodingSessionsBySpawningRun(run.id);
+      if (linked.some((cs) => TERMINAL_CODING_STATUSES.has(cs.status))) toResume.add(run.id);
     }
     return [...toResume];
   }
@@ -461,6 +472,9 @@ export class Daemon {
       aborter.abort();
       return true;
     }
+    // The inline finalize above settles a run with no runLoop and (if the PTY exit
+    // event never arrives) no resume job — messages parked behind it must not starve.
+    if (killedCoding) this.drainQueuedMessages(sessionKey);
     return killedCoding;
   }
 
@@ -707,6 +721,7 @@ export class Daemon {
   }
 
   private async processJob(job: Job): Promise<void> {
+    if (this.closed) return; // shutdown closed the spine — parked work waits for recovery
     if (job.kind === "message") return this.processWake(job.wake);
     if (job.kind === "trigger") return this.processTrigger(job.triggerId, job.event);
     if (job.kind === "queued") return this.processQueued(job.sessionKey);
@@ -717,32 +732,43 @@ export class Daemon {
     // A suspended run's last turn is a deliberately dangling tool_use awaiting its
     // tool_result (approval or subwork). Appending a user message there would wedge
     // the session: every later model call 400s on the unanswered tool_use. Park the
-    // message durably instead; it's delivered as its own run once the session frees up.
-    if (this.spine.hasSuspendedRun(wake.sessionKey)) {
-      this.spine.enqueueQueuedMessage({
-        sessionKey: wake.sessionKey,
-        agentId: wake.agentId,
-        text: wake.message,
-      });
-      this.sink.emit({
-        type: "message.queued",
-        text: wake.message,
-        sessionKey: wake.sessionKey,
-        runId: "",
-      });
+    // message durably instead; it's delivered as its own run once the session frees
+    // up. Also park while older messages are still parked (even if the session is
+    // momentarily free) — otherwise a fresh message overtakes them and delivery
+    // order inverts.
+    if (this.spine.sessionSuspended(wake.sessionKey) || this.spine.nextQueuedMessage(wake.sessionKey)) {
+      this.parkQueuedMessage(wake.sessionKey, wake.agentId, wake.message);
       return;
     }
     await this.startMessageRun(wake);
   }
 
-  /** Append the wake's message, mint a run, and drive the loop — the shared tail
-   *  of every text wake (user message, trigger fire, queued delivery). */
+  /** Park a message durably for later delivery and announce it (`message.queued`)
+   *  so surfaces/the TUI can show the send wasn't dropped. */
+  private parkQueuedMessage(sessionKey: string, agentId: string, text: string, source?: RunSource): void {
+    this.spine.enqueueQueuedMessage({ sessionKey, agentId, text, ...(source ? { source } : {}) });
+    this.sink.emit({
+      type: "message.queued",
+      text,
+      ...(source ? { source } : {}),
+      sessionKey,
+      runId: "",
+    });
+  }
+
+  /** Append the wake's message, then mint a run and drive the loop — the shared
+   *  head of an ordinary text wake (user message, trigger fire). */
   private async startMessageRun(wake: Wake, source?: RunSource): Promise<void> {
     // Snapshot the current default model onto a new session so it sticks.
     this.spine.ensureSession(wake.sessionKey, wake.agentId, this.spine.getAgent(wake.agentId)?.model);
     this.spine.appendMessage(wake.sessionKey, "user", [
       { type: "text", text: wake.message },
     ]);
+    await this.driveMessageRun(wake, source);
+  }
+
+  /** Mint a run for an already-appended message and drive the loop. */
+  private async driveMessageRun(wake: Wake, source?: RunSource): Promise<void> {
     const run = this.spine.createRun({
       id: newRunId(),
       agentId: wake.agentId,
@@ -765,11 +791,25 @@ export class Daemon {
   private async processQueued(sessionKey: string): Promise<void> {
     // Re-check at delivery time — an earlier inbox job may have re-suspended the
     // session. The row stays parked; a later drain picks it up.
-    if (this.spine.hasSuspendedRun(sessionKey)) return;
+    if (this.spine.sessionSuspended(sessionKey)) return;
     const q = this.spine.nextQueuedMessage(sessionKey);
     if (!q) return;
-    this.spine.deleteQueuedMessage(q.id);
-    await this.startMessageRun(
+    // A parked trigger fire whose trigger was disabled or deleted while parked is
+    // stale — running it would execute a routine the operator explicitly turned
+    // off. Drop it and move on to the next parked message.
+    if (q.source?.kind === "trigger") {
+      const trigger = this.spine.getTrigger(q.source.triggerId);
+      if (!trigger || !trigger.enabled) {
+        this.spine.deleteQueuedMessage(q.id);
+        this.drainQueuedMessages(sessionKey);
+        return;
+      }
+    }
+    this.spine.ensureSession(q.sessionKey, q.agentId, this.spine.getAgent(q.agentId)?.model);
+    // Atomic delete+append: after this the message is durably in the conversation
+    // (and only there) — a crash can neither lose nor double-deliver it.
+    this.spine.consumeQueuedMessage(q);
+    await this.driveMessageRun(
       { sessionKey: q.sessionKey, agentId: q.agentId, message: q.text },
       q.source,
     );
@@ -780,7 +820,7 @@ export class Daemon {
   private drainQueuedMessages(sessionKey: string): void {
     if (this.closed) return; // shutting down — the rows persist; recovery drains them
     if (this.recovering) return; // recover() drains everything once its direct drives finish
-    if (this.spine.hasSuspendedRun(sessionKey)) return;
+    if (this.spine.sessionSuspended(sessionKey)) return;
     if (!this.spine.nextQueuedMessage(sessionKey)) return;
     void this.inbox.enqueue({ kind: "queued", sessionKey });
   }
@@ -805,23 +845,12 @@ export class Daemon {
     };
     // A trigger session whose run is parked (e.g. a proactive run awaiting subwork)
     // has the same dangling-tool_use hazard as a user message — park the fire.
-    // Coalesce: a recurring trigger re-firing while parked shouldn't pile up
-    // identical wakes; one pending copy of the instruction is enough.
-    if (this.spine.hasSuspendedRun(trigger.sessionKey)) {
-      if (!this.spine.hasQueuedMessage(trigger.sessionKey, text)) {
-        this.spine.enqueueQueuedMessage({
-          sessionKey: trigger.sessionKey,
-          agentId: trigger.agentId,
-          text,
-          source,
-        });
-        this.sink.emit({
-          type: "message.queued",
-          text,
-          source,
-          sessionKey: trigger.sessionKey,
-          runId: "",
-        });
+    // Coalesce by trigger id: a recurring trigger (or a busy file watch, whose
+    // fires differ in text) re-firing while parked keeps ONE pending fire, not a
+    // backlog that unleashes a run storm on resume.
+    if (this.spine.sessionSuspended(trigger.sessionKey) || this.spine.nextQueuedMessage(trigger.sessionKey)) {
+      if (!this.spine.hasQueuedTriggerFire(trigger.sessionKey, trigger.id)) {
+        this.parkQueuedMessage(trigger.sessionKey, trigger.agentId, text, source);
       }
       return;
     }
@@ -847,6 +876,17 @@ export class Daemon {
   }
 
   private async runLoop(run: Run, options: LoopOptions = {}): Promise<void> {
+    try {
+      await this.driveLoop(run, options);
+    } finally {
+      // EVERY exit from a drive — completion, re-suspension, the missing-agent
+      // early return, or a throw — checks for parked messages. (The drain guards
+      // internally on the session still being suspended.)
+      this.drainQueuedMessages(run.sessionKey);
+    }
+  }
+
+  private async driveLoop(run: Run, options: LoopOptions = {}): Promise<void> {
     // Resolve the wake source: an explicit option wins, else the run's DURABLE source
     // (so a recovered/resumed run keeps its proactive policy), else a plain message.
     const resolvedOptions: LoopOptions = {
@@ -949,8 +989,5 @@ export class Daemon {
     } finally {
       this.aborters.delete(run.sessionKey);
     }
-    // The run settled (or re-suspended — the drain guards on that): deliver the
-    // oldest message parked while the session was suspended, if any.
-    this.drainQueuedMessages(run.sessionKey);
   }
 }

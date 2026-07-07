@@ -103,6 +103,33 @@ function args(spine: Spine, router: FakeRouter, events: ReefEventInit[], policy:
 }
 
 describe("maybeCompact", () => {
+  it("skips compaction (returns false) when the summarize call fails, instead of failing the run", async () => {
+    // Compaction is opportunistic — a transient provider failure (529/overloaded)
+    // in the summarize turn must not fail the run before its real turn is even
+    // attempted. The main turn then surfaces the real cause if the provider is
+    // actually down. (The router now throws real stream errors — RF-10.)
+    const spine = seededSpine(tempDb(), 200);
+    const throwingRouter: ModelRouter = {
+      async generateTurn(): Promise<ModelTurn> {
+        throw new Error("Overloaded: the provider returned 529");
+      },
+    };
+    const events: ReefEventInit[] = [];
+
+    const did = await maybeCompact({
+      spine,
+      router: throwingRouter,
+      run: spine.getRun("run_1")!,
+      agent,
+      emit: (body: unknown) => events.push({ ...(body as object), sessionKey: "s1", runId: "run_1" } as ReefEventInit),
+      policy: { triggerTokens: 100, keepRecentMessages: 2 },
+    });
+
+    expect(did).toBe(false);
+    expect(spine.getLatestCompaction("s1")).toBeUndefined();
+    spine.close();
+  });
+
   it("compacts a fresh single-step (chat) run off the SESSION's last step, not just the current run's (RF-09)", async () => {
     // A no-tool chat run commits its one step only when it ENDS, so maybeCompact at
     // the loop top sees 0 committed steps for the current run — it must trigger off the

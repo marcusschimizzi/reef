@@ -301,16 +301,20 @@ export class CodingSessionManager {
    *  `cancelled`): nobody cancelled the work — the daemon is going down. It keeps the
    *  session revivable via --resume and lets recovery resume the stranded spawning
    *  run on the next boot, exactly like the crash path. The `closed` latch makes a
-   *  late exit handler a no-op so it can't overwrite the recorded status. */
+   *  late exit handler a no-op so it can't overwrite the recorded status — which is
+   *  also why the trace's end-of-life record is written HERE (the latched handler
+   *  no longer writes its exit record). */
   close(): void {
     this.closed = true;
     for (const [id, l] of this.live) {
       this.disarmIdle(id);
       this.clearWatch(id);
-      const diag =
-        `The coding session (${id}) was interrupted by a daemon shutdown — its process was ` +
-        `stopped. It can be revived from where it left off with send_feedback("${id}", "<how to continue>").`;
-      this.deps.spine.setCodingSessionStatus(id, "process_lost", diag);
+      l.trace.write({ type: "lifecycle", event: "shutdown" });
+      this.deps.spine.setCodingSessionStatus(
+        id,
+        "process_lost",
+        interruptedSessionDiag(id, "a daemon shutdown — its process was stopped"),
+      );
       l.handle.kill();
       l.trace.close();
     }
@@ -555,6 +559,16 @@ export class CodingSessionManager {
   private emitCoding(id: string, body: { type: string } & Record<string, unknown>): void {
     this.deps.emit({ ...body, sessionKey: `coding:${id}`, runId: "" } as Parameters<EmitFn>[0]);
   }
+}
+
+/** The revive instruction recorded on a session whose process reef lost (crash,
+ *  restart, shutdown) — one template shared by the shutdown and boot-recovery
+ *  paths so the agent-facing send_feedback call syntax never drifts. */
+export function interruptedSessionDiag(id: string, cause: string): string {
+  return (
+    `The coding session (${id}) was interrupted by ${cause}. It can be revived ` +
+    `from where it left off with send_feedback("${id}", "<how to continue>").`
+  );
 }
 
 /** Expand a leading `~`/`~/` to the home dir and resolve to an absolute path.

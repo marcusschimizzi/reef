@@ -100,7 +100,7 @@ export class VercelRouter implements ModelRouter {
       else if (chunk.type === "error") streamError ??= chunk.error;
     }
     if (streamError !== undefined) {
-      throw streamError instanceof Error ? streamError : new Error(String(streamError));
+      throw streamError instanceof Error ? streamError : new Error(stringifyError(streamError));
     }
 
     const [finishReason, toolCalls, text, usage] = await Promise.all([
@@ -126,6 +126,16 @@ export class VercelRouter implements ModelRouter {
 }
 
 // ── mapping at the boundary ──────────────────────────────────────────────────
+
+/** A non-Error stream error rendered diagnosably — String() on a provider's plain
+ *  error object yields "[object Object]", hiding the status/message it carries. */
+function stringifyError(v: unknown): string {
+  try {
+    return JSON.stringify(v) ?? String(v);
+  } catch {
+    return String(v);
+  }
+}
 
 function toTurnStop(reason: string): TurnStop {
   switch (reason) {
