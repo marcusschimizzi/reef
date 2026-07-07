@@ -60,9 +60,10 @@ export class VercelRouter implements ModelRouter {
   private readonly registry: ProviderRegistry;
 
   /** Pass user-configured providers (custom endpoints) and the secret store
-   *  (the primary source for API keys) to extend the built-ins. */
-  constructor(providers: ProviderConfig[] = [], secrets?: SecretStore) {
-    this.registry = new ProviderRegistry(providers, secrets);
+   *  (the primary source for API keys) to extend the built-ins. `registry`
+   *  overrides both — the offline-test seam for injecting a mock model. */
+  constructor(providers: ProviderConfig[] = [], secrets?: SecretStore, registry?: ProviderRegistry) {
+    this.registry = registry ?? new ProviderRegistry(providers, secrets);
   }
 
   /** Build (and cache) the provider for `modelId`, throwing if its provider is
@@ -72,6 +73,12 @@ export class VercelRouter implements ModelRouter {
   }
 
   async generateTurn(input: ModelTurnInput): Promise<ModelTurn> {
+    // Capture stream-level failures (RF-10). streamText does NOT reject on a
+    // provider error — it emits an `error` chunk and resolves; without capturing
+    // it here an overloaded/401/429 response comes back as an EMPTY successful
+    // turn, indistinguishable from the model choosing to say nothing. Rethrowing
+    // the original error is what makes a 3am failure diagnosable in run.failed.
+    let streamError: unknown;
     const result = streamText({
       model: this.registry.resolve(input.model),
       system: input.system,
@@ -79,6 +86,9 @@ export class VercelRouter implements ModelRouter {
       tools: input.tools ? toAiTools(input.tools) : undefined,
       maxOutputTokens: input.maxOutputTokens ?? 8192,
       abortSignal: input.signal,
+      onError: ({ error }) => {
+        streamError ??= error;
+      },
     });
 
     // Drain the stream so deltas reach the consumer; the promises below resolve
@@ -87,6 +97,10 @@ export class VercelRouter implements ModelRouter {
       if (chunk.type === "text-delta") input.onTextDelta?.(chunk.text);
       else if (chunk.type === "reasoning-delta")
         input.onThinkingDelta?.(chunk.text);
+      else if (chunk.type === "error") streamError ??= chunk.error;
+    }
+    if (streamError !== undefined) {
+      throw streamError instanceof Error ? streamError : new Error(String(streamError));
     }
 
     const [finishReason, toolCalls, text, usage] = await Promise.all([
