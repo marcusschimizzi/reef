@@ -121,6 +121,15 @@ export function reduceEvent(state: TranscriptState, event: ReefEvent): Transcrip
       // the single source of the user line, live and on history replay.
       return push(state, { kind: "user", text: event.text });
 
+    case "message.queued":
+      // A send while the session's run was parked: parked durably, delivered as
+      // its own run later (whose message.received renders the real user line).
+      // Show it as a notice now so the send doesn't look dropped.
+      return push(state, {
+        kind: "notice",
+        text: `⧗ queued: ${event.text} (delivers when the session is free)`,
+      });
+
     case "thinking.delta": {
       const last = state.items.at(-1);
       if (last?.kind === "thinking") {

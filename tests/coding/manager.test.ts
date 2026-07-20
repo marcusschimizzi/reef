@@ -226,12 +226,23 @@ describe("CodingSessionManager", () => {
     expect(spine.getCodingSession(id)!.result).toBe("Done: created a.ts");
   });
 
-  it("close() kills live sessions and marks them cancelled", () => {
+  it("close() kills live sessions and marks them process_lost (revivable), immune to a late exit event", () => {
     const { spine, driver, mgr } = setup();
     const id = mgr.start({ agentKind: "claude-code", directory: "/tmp/x", task: "t" });
     mgr.close();
     expect(driver.handle.killed).toBe(true);
-    expect(spine.getCodingSession(id)!.status).toBe("cancelled");
+    // A shutdown is not a cancel: the work wasn't refused, the daemon went down.
+    // process_lost keeps the session revivable and recovery resumes its run.
+    const cs = spine.getCodingSession(id)!;
+    expect(cs.status).toBe("process_lost");
+    expect(cs.result).toContain("send_feedback");
+    // The trace must record WHY it ended — the latched exit handler no longer
+    // writes the exit record, so close() itself marks the shutdown.
+    const trace = readFileSync(cs.tracePath, "utf8");
+    expect(trace).toContain('"shutdown"');
+    // The PTY exit racing shutdown must not re-record (e.g. `failed` over this).
+    driver.handle.die(137);
+    expect(spine.getCodingSession(id)!.status).toBe("process_lost");
   });
 
   it("injects the handback instruction into the agent's system prompt", () => {

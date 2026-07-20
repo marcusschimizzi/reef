@@ -26,6 +26,14 @@ const lastOf = <K extends TranscriptItem["kind"]>(s: TranscriptState, kind: K) =
   [...s.items].reverse().find((i) => i.kind === kind) as Extract<TranscriptItem, { kind: K }>;
 
 describe("transcript reducer", () => {
+  it("renders message.queued as a visible notice so a parked send doesn't look dropped", () => {
+    const s = run(ev({ type: "message.queued", text: "also, use bun please" }));
+    const notice = lastOf(s, "notice");
+    expect(notice).toBeDefined();
+    expect(notice.text).toContain("also, use bun please");
+    expect(notice.text.toLowerCase()).toContain("queued");
+  });
+
   it("coalesces message deltas into one streaming assistant item, then finalizes", () => {
     const s = run(
       ev({ type: "run.started", agentId: "reef" }),

@@ -167,6 +167,21 @@ CREATE TABLE IF NOT EXISTS coding_sessions (
   ended_at     TEXT
 );
 
+-- Messages that arrived while their session's run was suspended (awaiting an
+-- approval or subwork). The suspended turn deliberately ends in a dangling
+-- tool_use; appending a user message there would 400-poison every later model
+-- call on the session. Parked here instead, durably, and delivered as ordinary
+-- wakes (FIFO) once the session is free again.
+CREATE TABLE IF NOT EXISTS queued_messages (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_key TEXT NOT NULL,
+  agent_id    TEXT NOT NULL,
+  text        TEXT NOT NULL,
+  source      TEXT,             -- JSON RunSource; null = interactive message
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_queued_messages_session ON queued_messages(session_key, id);
+
 -- Durable approvals for a coding session's interactive prompts (Step 3). Separate
 -- from \`approvals\` on purpose: these belong to an external PTY session, not a reef
 -- run, so resolving one injects a keystroke into the session rather than re-driving

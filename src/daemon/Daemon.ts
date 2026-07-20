@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { newRunId, newTriggerId } from "../core/ids.js";
-import { CodingSessionManager } from "../coding/manager.js";
+import { CodingSessionManager, interruptedSessionDiag } from "../coding/manager.js";
 import { PtyClaudeDriver } from "../coding/ptyClaude.js";
 import type { CodingAgentDriver } from "../coding/driver.js";
 import { nowIso } from "../core/time.js";
@@ -103,13 +103,16 @@ const MISSED_GRACE_MS = 90_000;
 
 // Coding-session statuses that are terminal from the spawning run's point of view:
 // the run can collect a result and continue. `paused` = handed back (resumable);
-// `process_lost` = the PTY died (crash) — a resumable failure. The non-terminal ones
-// (running, awaiting_decision) mean the increment is still in flight.
+// `process_lost` = the PTY died (crash/shutdown) — a resumable failure; `cancelled` =
+// deliberately stopped (a failed-shaped result, else the operator cancelling a session
+// would re-park its spawning run forever). The non-terminal ones (running,
+// awaiting_decision) mean the increment is still in flight.
 const TERMINAL_CODING_STATUSES: ReadonlySet<string> = new Set([
   "completed",
   "failed",
   "paused",
   "process_lost",
+  "cancelled",
 ]);
 
 // Everything the agent might wake for funnels into one serial inbox: a user
@@ -120,7 +123,9 @@ type Job =
   | { kind: "resume"; runId: string }
   // `event` is set when a file-watch trigger fired (Phase 4d) — the change to
   // thread into the wake; absent for time-driven (schedule/heartbeat) fires.
-  | { kind: "trigger"; triggerId: string; event?: WatchEvent };
+  | { kind: "trigger"; triggerId: string; event?: WatchEvent }
+  // Deliver the oldest message parked while this session's run was suspended.
+  | { kind: "queued"; sessionKey: string };
 
 /**
  * The always-on agent runtime. Owns the spine (state), the router (model), the
@@ -152,6 +157,13 @@ export class Daemon {
   /** Abort handles for in-flight runs, keyed by session — powers cancellation. */
   private readonly aborters = new Map<string, AbortController>();
   private readonly coding: CodingSessionManager;
+  /** Set by close(): late async work (a drain scheduled behind a settling run)
+   *  must not touch the now-closed spine. */
+  private closed = false;
+  /** True while recover() drives runs directly (outside the serial inbox). A drain
+   *  kicked mid-recovery would start a delivery run the interrupted-run scan then
+   *  sees as `running` and re-drives concurrently — so drains wait for the end. */
+  private recovering = false;
 
   constructor(opts: DaemonOptions) {
     this.spine = new Spine(opts.dbPath);
@@ -284,7 +296,9 @@ export class Daemon {
     return this.sink.subscribe(fn);
   }
 
-  /** Enqueue a user-message wake; resolves when its run terminates or suspends. */
+  /** Enqueue a user-message wake; resolves when its run terminates or suspends —
+   *  or, if the session's current run is itself suspended, once the message has
+   *  been durably parked for delivery after that run settles (`message.queued`). */
   submit(wake: Wake): Promise<void> {
     return this.inbox.enqueue({ kind: "message", wake });
   }
@@ -342,48 +356,79 @@ export class Daemon {
    * returned here — they resume only when their approvals resolve.
    */
   async recover(): Promise<void> {
-    // Rebuild the in-memory run→source routing map from the durable record. A run
-    // suspended (awaiting approval/subwork) before the crash is NOT re-driven here — it
-    // resumes later when its approval resolves — and that resume path won't re-emit
-    // run.started, so without this seed routeApproval wouldn't know it's proactive.
-    for (const run of this.spine.listSuspendedRuns()) {
-      this.runMeta.set(run.id, { proactive: run.source?.kind === "trigger", agentId: run.agentId });
+    this.recovering = true;
+    try {
+      // Rebuild the in-memory run→source routing map from the durable record. A run
+      // suspended (awaiting approval/subwork) before the crash is NOT re-driven here — it
+      // resumes later when its approval resolves — and that resume path won't re-emit
+      // run.started, so without this seed routeApproval wouldn't know it's proactive.
+      for (const run of this.spine.listSuspendedRuns()) {
+        this.runMeta.set(run.id, { proactive: run.source?.kind === "trigger", agentId: run.agentId });
+      }
+      // A coding session left non-terminal by a crash has a dead PTY (its child process
+      // died with the daemon) but its row still says running, and its spawning run is
+      // parked `awaiting_subwork` — which getInterruptedRuns does NOT return, so it would
+      // hang forever. Reconcile those first: mark the session process_lost and resume the
+      // stranded run so it collects an (error) result and continues.
+      for (const runId of this.recoverCodingSessions()) {
+        await this.resumeRun(runId);
+      }
+      // An approval resolved durably whose in-memory resume job died with the
+      // daemon leaves a run suspended with zero pending approvals — finish it now,
+      // or it hangs forever and the session parks every future message behind it.
+      for (const run of this.spine.listSuspendedRuns()) {
+        if (
+          run.stopReason === "awaiting_approval" &&
+          this.spine.pendingApprovalCount(run.id) === 0
+        ) {
+          await this.resumeRun(run.id);
+        }
+      }
+      for (const run of this.spine.getInterruptedRuns()) {
+        // Close any tool_use the crash left unanswered before re-driving — otherwise the
+        // re-driven context ends with a tool_use lacking its tool_result and the provider
+        // 400s on every recovery attempt (RF-08).
+        this.spine.repairDanglingToolUses(run.sessionKey, run.id);
+        await this.runLoop(run);
+      }
+    } finally {
+      this.recovering = false;
     }
-    // A coding session left non-terminal by a crash has a dead PTY (its child process
-    // died with the daemon) but its row still says running, and its spawning run is
-    // parked `awaiting_subwork` — which getInterruptedRuns does NOT return, so it would
-    // hang forever. Reconcile those first: mark the session process_lost and resume the
-    // stranded run so it collects an (error) result and continues.
-    for (const runId of this.recoverCodingSessions()) {
-      await this.resumeRun(runId);
-    }
-    for (const run of this.spine.getInterruptedRuns()) {
-      // Close any tool_use the crash left unanswered before re-driving — otherwise the
-      // re-driven context ends with a tool_use lacking its tool_result and the provider
-      // 400s on every recovery attempt (RF-08).
-      this.spine.repairDanglingToolUses(run.sessionKey, run.id);
-      await this.runLoop(run);
+    // Messages parked while a session was suspended and not yet delivered when the
+    // daemon went down: schedule delivery for any session that is free again. Done
+    // only now — a drain mid-recovery would start a delivery run the interrupted-run
+    // scan above then double-drives (it reads status 'running' from the spine).
+    for (const sessionKey of this.spine.queuedMessageSessions()) {
+      this.drainQueuedMessages(sessionKey);
     }
   }
 
   /** Mark coding sessions orphaned by a crash as `process_lost` (the daemon just
-   *  started, so nothing is live — any still-running row is dead). Returns the
-   *  spawning run ids parked `awaiting_subwork` that need resuming. */
+   *  started, so nothing is live — any still-live row is dead), then collect the
+   *  spawning runs still parked `awaiting_subwork` whose session is already terminal
+   *  — the crash-flipped ones, plus sessions a clean shutdown marked process_lost or
+   *  a crash caught between handback and resume. Scans the (small) live-session and
+   *  suspended-run sets, not the unbounded terminal-session history. */
   private recoverCodingSessions(): string[] {
-    const toResume: string[] = [];
-    for (const cs of this.spine.listCodingSessions()) {
-      if (cs.status !== "running" && cs.status !== "awaiting_decision") continue;
-      const diag =
-        `The coding session (${cs.id}) was interrupted by a daemon restart — its process did not ` +
-        `survive (status before the restart: ${cs.status}). It can be revived from where it left off ` +
-        `with send_feedback("${cs.id}", "<how to continue>").`;
-      this.spine.setCodingSessionStatus(cs.id, "process_lost", diag);
-      if (cs.spawningRunId) {
-        const run = this.spine.getRun(cs.spawningRunId);
-        if (run?.status === "suspended") toResume.push(cs.spawningRunId);
-      }
+    for (const cs of this.spine.listNonTerminalCodingSessions()) {
+      this.spine.setCodingSessionStatus(
+        cs.id,
+        "process_lost",
+        interruptedSessionDiag(
+          cs.id,
+          `a daemon restart — its process did not survive (status before the restart: ${cs.status})`,
+        ),
+      );
     }
-    return toResume;
+    const toResume = new Set<string>();
+    for (const run of this.spine.listSuspendedRuns()) {
+      // Only an awaiting_subwork park is a coding-session strand; a run suspended
+      // awaiting_approval is parked for a human and must stay parked.
+      if (run.stopReason !== "awaiting_subwork") continue;
+      const linked = this.spine.listCodingSessionsBySpawningRun(run.id);
+      if (linked.some((cs) => TERMINAL_CODING_STATUSES.has(cs.status))) toResume.add(run.id);
+    }
+    return [...toResume];
   }
 
   /** Cancel the in-flight run for a session (reef-docs/03 cancellation). Also
@@ -427,6 +472,9 @@ export class Daemon {
       aborter.abort();
       return true;
     }
+    // The inline finalize above settles a run with no runLoop and (if the PTY exit
+    // event never arrives) no resume job — messages parked behind it must not starve.
+    if (killedCoding) this.drainQueuedMessages(sessionKey);
     return killedCoding;
   }
 
@@ -438,6 +486,7 @@ export class Daemon {
   }
 
   close(): void {
+    this.closed = true;
     this.scheduler.stop();
     this.watcher.stop();
     this.coding.close(); // kill live coding sessions + close their traces before the spine
@@ -672,30 +721,119 @@ export class Daemon {
   }
 
   private async processJob(job: Job): Promise<void> {
+    if (this.closed) {
+      // Shutdown. Void-enqueued work (resume/queued/trigger) is recoverable from
+      // durable state on the next boot — swallow it; a throw here would only be
+      // an unhandled rejection. A message job is different: its submit() promise
+      // is the sender's ONLY receipt, and the message was neither run nor parked
+      // — resolving would report a silently-dropped message as delivered. Reject
+      // so the socket/HTTP layer tells the client to retry after the restart.
+      if (job.kind === "message") {
+        throw new Error("the daemon is shutting down — the message was not accepted; retry after restart");
+      }
+      return;
+    }
     if (job.kind === "message") return this.processWake(job.wake);
     if (job.kind === "trigger") return this.processTrigger(job.triggerId, job.event);
+    if (job.kind === "queued") return this.processQueued(job.sessionKey);
     return this.resumeRun(job.runId);
   }
 
   private async processWake(wake: Wake): Promise<void> {
+    // A suspended run's last turn is a deliberately dangling tool_use awaiting its
+    // tool_result (approval or subwork). Appending a user message there would wedge
+    // the session: every later model call 400s on the unanswered tool_use. Park the
+    // message durably instead; it's delivered as its own run once the session frees
+    // up. Also park while older messages are still parked (even if the session is
+    // momentarily free) — otherwise a fresh message overtakes them and delivery
+    // order inverts.
+    if (this.spine.sessionSuspended(wake.sessionKey) || this.spine.nextQueuedMessage(wake.sessionKey)) {
+      this.parkQueuedMessage(wake.sessionKey, wake.agentId, wake.message);
+      return;
+    }
+    await this.startMessageRun(wake);
+  }
+
+  /** Park a message durably for later delivery and announce it (`message.queued`)
+   *  so surfaces/the TUI can show the send wasn't dropped. */
+  private parkQueuedMessage(sessionKey: string, agentId: string, text: string, source?: RunSource): void {
+    this.spine.enqueueQueuedMessage({ sessionKey, agentId, text, ...(source ? { source } : {}) });
+    this.sink.emit({
+      type: "message.queued",
+      text,
+      ...(source ? { source } : {}),
+      sessionKey,
+      runId: "",
+    });
+  }
+
+  /** Append the wake's message, then mint a run and drive the loop — the shared
+   *  head of an ordinary text wake (user message, trigger fire). */
+  private async startMessageRun(wake: Wake, source?: RunSource): Promise<void> {
     // Snapshot the current default model onto a new session so it sticks.
     this.spine.ensureSession(wake.sessionKey, wake.agentId, this.spine.getAgent(wake.agentId)?.model);
     this.spine.appendMessage(wake.sessionKey, "user", [
       { type: "text", text: wake.message },
     ]);
+    await this.driveMessageRun(wake, source);
+  }
+
+  /** Mint a run for an already-appended message and drive the loop. */
+  private async driveMessageRun(wake: Wake, source?: RunSource): Promise<void> {
     const run = this.spine.createRun({
       id: newRunId(),
       agentId: wake.agentId,
       sessionKey: wake.sessionKey,
-      source: { kind: "message" },
+      source: source ?? { kind: "message" },
     });
     this.sink.emit({
       type: "message.received",
       text: wake.message,
+      ...(source ? { source } : {}),
       sessionKey: wake.sessionKey,
       runId: run.id,
     });
-    await this.runLoop(run);
+    await this.runLoop(run, source ? { source } : {});
+  }
+
+  /** Deliver the oldest parked message for a session, if it is free again. The
+   *  delivery is one-at-a-time: this run's completion schedules the next drain,
+   *  preserving FIFO even if a delivery re-suspends the session. */
+  private async processQueued(sessionKey: string): Promise<void> {
+    // Re-check at delivery time — an earlier inbox job may have re-suspended the
+    // session. The row stays parked; a later drain picks it up.
+    if (this.spine.sessionSuspended(sessionKey)) return;
+    const q = this.spine.nextQueuedMessage(sessionKey);
+    if (!q) return;
+    // A parked trigger fire whose trigger was disabled or deleted while parked is
+    // stale — running it would execute a routine the operator explicitly turned
+    // off. Drop it and move on to the next parked message.
+    if (q.source?.kind === "trigger") {
+      const trigger = this.spine.getTrigger(q.source.triggerId);
+      if (!trigger || !trigger.enabled) {
+        this.spine.deleteQueuedMessage(q.id);
+        this.drainQueuedMessages(sessionKey);
+        return;
+      }
+    }
+    this.spine.ensureSession(q.sessionKey, q.agentId, this.spine.getAgent(q.agentId)?.model);
+    // Atomic delete+append: after this the message is durably in the conversation
+    // (and only there) — a crash can neither lose nor double-deliver it.
+    this.spine.consumeQueuedMessage(q);
+    await this.driveMessageRun(
+      { sessionKey: q.sessionKey, agentId: q.agentId, message: q.text },
+      q.source,
+    );
+  }
+
+  /** If the session is free and has parked messages, schedule delivery of the
+   *  oldest (its own run completion schedules the next). */
+  private drainQueuedMessages(sessionKey: string): void {
+    if (this.closed) return; // shutting down — the rows persist; recovery drains them
+    if (this.recovering) return; // recover() drains everything once its direct drives finish
+    if (this.spine.sessionSuspended(sessionKey)) return;
+    if (!this.spine.nextQueuedMessage(sessionKey)) return;
+    void this.inbox.enqueue({ kind: "queued", sessionKey });
   }
 
   /** A trigger fired: seed its configured instruction as the wake and run, on
@@ -705,37 +843,32 @@ export class Daemon {
   private async processTrigger(triggerId: string, event?: WatchEvent): Promise<void> {
     const trigger = this.spine.getTrigger(triggerId);
     if (!trigger || !trigger.enabled) return;
-    this.spine.ensureSession(
-      trigger.sessionKey,
-      trigger.agentId,
-      this.spine.getAgent(trigger.agentId)?.model,
-    );
     // The file path is filesystem-controlled (an attacker can name a file with
     // injection text), so the change description crosses the trust boundary — wrap it.
     const text = event
       ? `${trigger.input}\n\n${wrapUntrusted(`file event: ${event.type} at ${event.path}`, "file-watch")}`
       : trigger.input;
-    this.spine.appendMessage(trigger.sessionKey, "user", [{ type: "text", text }]);
     const source: RunSource = {
       kind: "trigger",
       triggerId: trigger.id,
       triggerType: trigger.type,
       ...(event ? { event } : {}),
     };
-    const run = this.spine.createRun({
-      id: newRunId(),
-      agentId: trigger.agentId,
-      sessionKey: trigger.sessionKey,
+    // A trigger session whose run is parked (e.g. a proactive run awaiting subwork)
+    // has the same dangling-tool_use hazard as a user message — park the fire.
+    // Coalesce by trigger id: a recurring trigger (or a busy file watch, whose
+    // fires differ in text) re-firing while parked keeps ONE pending fire, not a
+    // backlog that unleashes a run storm on resume.
+    if (this.spine.sessionSuspended(trigger.sessionKey) || this.spine.nextQueuedMessage(trigger.sessionKey)) {
+      if (!this.spine.hasQueuedTriggerFire(trigger.sessionKey, trigger.id)) {
+        this.parkQueuedMessage(trigger.sessionKey, trigger.agentId, text, source);
+      }
+      return;
+    }
+    await this.startMessageRun(
+      { sessionKey: trigger.sessionKey, agentId: trigger.agentId, message: text },
       source,
-    });
-    this.sink.emit({
-      type: "message.received",
-      text,
-      source,
-      sessionKey: trigger.sessionKey,
-      runId: run.id,
-    });
-    await this.runLoop(run, { source });
+    );
   }
 
   private async resumeRun(runId: string): Promise<void> {
@@ -743,13 +876,28 @@ export class Daemon {
     // Only a still-suspended run resumes. A resume job for a run that already
     // reached a terminal state (e.g. cancel marked it completed before the
     // post-kill coding.session.completed enqueued this resume) is a no-op,
-    // rather than re-driving the subwork preamble and re-parking it forever.
-    if (!run || run.status !== "suspended") return;
+    // rather than re-driving the subwork preamble and re-parking it forever —
+    // but messages parked behind that (now settled) run still need delivering.
+    if (!run || run.status !== "suspended") {
+      if (run) this.drainQueuedMessages(run.sessionKey);
+      return;
+    }
     this.spine.setRunStatus(runId, "running");
     await this.runLoop({ ...run, status: "running" }, { resumeApproval: true });
   }
 
   private async runLoop(run: Run, options: LoopOptions = {}): Promise<void> {
+    try {
+      await this.driveLoop(run, options);
+    } finally {
+      // EVERY exit from a drive — completion, re-suspension, the missing-agent
+      // early return, or a throw — checks for parked messages. (The drain guards
+      // internally on the session still being suspended.)
+      this.drainQueuedMessages(run.sessionKey);
+    }
+  }
+
+  private async driveLoop(run: Run, options: LoopOptions = {}): Promise<void> {
     // Resolve the wake source: an explicit option wins, else the run's DURABLE source
     // (so a recovered/resumed run keeps its proactive policy), else a plain message.
     const resolvedOptions: LoopOptions = {
@@ -832,15 +980,16 @@ export class Daemon {
           collectSubwork: (runId, toolUseId) => {
             const cs = this.spine.findCodingSessionBySubwork(runId, toolUseId);
             // `paused` = handed back (increment done, resumable); `process_lost` = the
-            // PTY died (crash recovery) — both are completable results for the manager
-            // run, like completed/failed. process_lost is failed-shaped (isError).
+            // PTY died (crash/shutdown); `cancelled` = deliberately stopped — all are
+            // completable results for the manager run, like completed/failed.
+            // process_lost and cancelled are failed-shaped (isError).
             if (!cs || !TERMINAL_CODING_STATUSES.has(cs.status)) return undefined;
             return {
               // The increment summary is a supervised sub-agent's output (scraped from
               // the repo it read) re-entering this tool-holding parent run — wrap it so
               // the parent treats it as data, not instructions (RF-22, sharpest case).
               result: wrapUntrusted(cs.result ?? `coding session ${cs.id} ${cs.status}`, "coding-session"),
-              failed: cs.status === "failed" || cs.status === "process_lost",
+              failed: cs.status === "failed" || cs.status === "process_lost" || cs.status === "cancelled",
               sessionId: cs.id,
               status: cs.status,
             };

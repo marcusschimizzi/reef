@@ -72,13 +72,17 @@ export async function maybeCompact(args: CompactArgs): Promise<boolean> {
   const throughSeq = foldable[foldable.length - 1]!.seq;
 
   // 3. Summarize through the router — provider-agnostic, just another turn.
-  const summary = await summarize(
-    router,
-    agent.model,
-    comp?.summary,
-    foldable,
-    signal,
-  );
+  //    Compaction is opportunistic: a failed summarize (e.g. a transient 529 —
+  //    the router rethrows real stream errors) must not fail the run before its
+  //    real turn is even attempted. Skip this round; if the provider is truly
+  //    down, the main turn fails with the real cause. A cancel still propagates.
+  let summary: string;
+  try {
+    summary = await summarize(router, agent.model, comp?.summary, foldable, signal);
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    return false;
+  }
   if (!summary) return false;
 
   spine.appendCompaction({ sessionKey: run.sessionKey, throughSeq, summary });

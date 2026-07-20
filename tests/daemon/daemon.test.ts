@@ -177,6 +177,191 @@ describe("Daemon", () => {
     daemon.close();
   });
 
+  it("a message to a session awaiting approval is queued and delivers after the approval resolves", async () => {
+    const dir = tempDir();
+    const gatedAgent: AgentRecord = { ...agent, toolAllowlist: ["shell"] };
+    const daemon = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      router: new FakeRouter([
+        {
+          stop: "tool_use",
+          content: [{ type: "tool_use", id: "t1", name: "shell", input: { command: "echo hi" } }],
+          usage: { inputTokens: 5, outputTokens: 2 },
+        },
+        { stop: "completed", content: [{ type: "text", text: "command done" }], usage: { inputTokens: 6, outputTokens: 2 } },
+        { stop: "completed", content: [{ type: "text", text: "answering your queued message" }], usage: { inputTokens: 4, outputTokens: 2 } },
+      ]),
+    });
+    daemon.registerAgent(gatedAgent);
+
+    await daemon.submit({ sessionKey: "s1", agentId: "reef", message: "run a command" });
+    const run = daemon.listRuns({}).find((r) => r.sessionKey === "s1")!;
+    expect(run.stopReason).toBe("awaiting_approval");
+
+    // A message while suspended must not be appended after the dangling tool_use.
+    await daemon.submit({ sessionKey: "s1", agentId: "reef", message: "afterwards, also say hello" });
+    expect(daemon.listRuns({}).filter((r) => r.sessionKey === "s1")).toHaveLength(1);
+    expect(JSON.stringify(daemon.spine.getMessages("s1"))).not.toContain("say hello");
+
+    // Resolving the approval resumes the run; the queued message follows as its own run.
+    const queuedRunDone = new Promise<void>((resolve) => {
+      const off = daemon.subscribe((e: ReefEvent) => {
+        if (e.type === "run.completed" && e.sessionKey === "s1" && e.runId !== run.id) { off(); resolve(); }
+      });
+    });
+    const approvalId = daemon.runsAwaitingApproval()[0]!.approvals[0]!.id;
+    daemon.resolveApproval(approvalId, "allow-once");
+    await queuedRunDone;
+
+    const runs = daemon.listRuns({}).filter((r) => r.sessionKey === "s1");
+    expect(runs).toHaveLength(2);
+    expect(runs.every((r) => r.status === "completed")).toBe(true);
+    expect(JSON.stringify(daemon.spine.getMessages("s1"))).toContain("say hello");
+    daemon.close();
+  });
+
+  it("submit() racing shutdown rejects — a dropped message must not look delivered", async () => {
+    const dir = tempDir();
+    const daemon = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      router: new FakeRouter([]),
+    });
+    daemon.registerAgent(agent);
+    daemon.close();
+
+    // The job is skipped by the shutdown guard — but the submit() promise is the
+    // sender's only receipt for a message that was neither run nor parked, so it
+    // must reject (the socket/HTTP layer reports it; the client retries later).
+    await expect(
+      daemon.submit({ sessionKey: "s1", agentId: "reef", message: "hi" }),
+    ).rejects.toThrow(/shutting down/);
+  });
+
+  it("delivers parked messages in arrival order — a fresh message must not overtake older parked ones", async () => {
+    const dir = tempDir();
+    const gatedAgent: AgentRecord = { ...agent, toolAllowlist: ["shell"] };
+    const daemon = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      router: new FakeRouter([
+        {
+          stop: "tool_use",
+          content: [{ type: "tool_use", id: "t1", name: "shell", input: { command: "echo hi" } }],
+          usage: { inputTokens: 5, outputTokens: 2 },
+        },
+        { stop: "completed", content: [{ type: "text", text: "command done" }], usage: { inputTokens: 6, outputTokens: 2 } },
+        { stop: "completed", content: [{ type: "text", text: "reply to first" }], usage: { inputTokens: 4, outputTokens: 2 } },
+        { stop: "completed", content: [{ type: "text", text: "reply to second" }], usage: { inputTokens: 4, outputTokens: 2 } },
+      ]),
+    });
+    daemon.registerAgent(gatedAgent);
+
+    await daemon.submit({ sessionKey: "s1", agentId: "reef", message: "run a command" }); // suspends
+    await daemon.submit({ sessionKey: "s1", agentId: "reef", message: "first parked" }); // queued
+
+    const received: string[] = [];
+    // Settled when the resumed run AND both deliveries have completed (3 runs) —
+    // not merely when the deliveries started, else teardown races the last run.
+    const allRunsDone = new Promise<void>((resolve) => {
+      let done = 0;
+      const off = daemon.subscribe((e: ReefEvent) => {
+        if (e.type === "message.received" && e.sessionKey === "s1" && e.text !== "run a command") {
+          received.push(e.text);
+        }
+        if (e.type === "run.completed" && e.sessionKey === "s1") {
+          done++;
+          if (done === 3) { off(); resolve(); }
+        }
+      });
+    });
+
+    // Resolve the approval (enqueues the resume) and send another message BEFORE the
+    // resumed run settles — its inbox job lands ahead of the post-settle drain job,
+    // so without an ordering guard it would overtake the older parked message.
+    const approvalId = daemon.runsAwaitingApproval()[0]!.approvals[0]!.id;
+    daemon.resolveApproval(approvalId, "allow-once");
+    const second = daemon.submit({ sessionKey: "s1", agentId: "reef", message: "second message" });
+
+    await allRunsDone;
+    await second;
+    expect(received).toEqual(["first parked", "second message"]);
+    daemon.close();
+  });
+
+  it("recover() finishes a suspended run whose approvals all resolved before a crash", async () => {
+    const dir = tempDir();
+    const gatedAgent: AgentRecord = { ...agent, toolAllowlist: ["shell"] };
+    const d1 = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      router: new FakeRouter([
+        {
+          stop: "tool_use",
+          content: [{ type: "tool_use", id: "t1", name: "shell", input: { command: "echo hi" } }],
+          usage: { inputTokens: 5, outputTokens: 2 },
+        },
+      ]),
+    });
+    d1.registerAgent(gatedAgent);
+    await d1.submit({ sessionKey: "s1", agentId: "reef", message: "run a command" });
+    const run = d1.listRuns({}).find((r) => r.sessionKey === "s1")!;
+    expect(run.stopReason).toBe("awaiting_approval");
+
+    // The approval is durably resolved, but the daemon dies before the in-memory
+    // resume job processes — the run is left suspended with zero pending approvals.
+    const approvalId = d1.runsAwaitingApproval()[0]!.approvals[0]!.id;
+    d1.spine.resolveApproval(approvalId, "allowed", "allow-once");
+    d1.close();
+
+    const d2 = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      router: new FakeRouter([
+        { stop: "completed", content: [{ type: "text", text: "command done" }], usage: { inputTokens: 6, outputTokens: 2 } },
+      ]),
+    });
+    d2.registerAgent(gatedAgent);
+    await d2.recover();
+
+    // Without this, the run hangs suspended forever and (worse) the session
+    // swallows every future message into the queue.
+    expect(d2.spine.getRun(run.id)!.status).toBe("completed");
+    d2.close();
+  });
+
+  it("a legacy stale suspended run (not the session's latest) does not park new messages", async () => {
+    const dir = tempDir();
+    const daemon = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      router: new FakeRouter([
+        { stop: "completed", content: [{ type: "text", text: "hello back" }], usage: { inputTokens: 4, outputTokens: 2 } },
+      ]),
+    });
+    daemon.registerAgent(agent);
+
+    // Legacy DB shape from before the queue existed: an old run abandoned in
+    // 'suspended' plus a newer completed run — the session looks (and is) idle.
+    daemon.spine.ensureSession("s1", "reef");
+    daemon.spine.createRun({ id: "run_old", agentId: "reef", sessionKey: "s1" });
+    daemon.spine.setRunStatus("run_old", "suspended", { stopReason: "awaiting_approval" });
+    daemon.spine.createRun({ id: "run_new", agentId: "reef", sessionKey: "s1" });
+    daemon.spine.setRunStatus("run_new", "completed", { stopReason: "completed" });
+
+    await daemon.submit({ sessionKey: "s1", agentId: "reef", message: "hello" });
+
+    // The message must start a run (latest run is settled), not queue forever.
+    const started = daemon
+      .listRuns({})
+      .filter((r) => r.sessionKey === "s1" && r.id !== "run_old" && r.id !== "run_new");
+    expect(started).toHaveLength(1);
+    expect(started[0]!.status).toBe("completed");
+    expect(daemon.spine.nextQueuedMessage("s1")).toBeUndefined();
+    daemon.close();
+  });
+
   it("a recovered proactive run still auto-denies gated tools (durable RunSource, RF-07)", async () => {
     const dir = tempDir();
     const dbPath = join(dir, "reef.db");

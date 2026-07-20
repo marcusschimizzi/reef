@@ -56,6 +56,18 @@ export interface CodingSessionRecord {
   endedAt?: string;
 }
 
+/** A message parked while its session's run was suspended (see queued_messages DDL). */
+export interface QueuedMessage {
+  id: number;
+  sessionKey: string;
+  agentId: string;
+  text: string;
+  /** The originating wake's source (a trigger fire that arrived while parked),
+   *  so delivery runs under the right policy. Absent = interactive message. */
+  source?: RunSource;
+  createdAt: string;
+}
+
 export interface CodingApprovalRecord {
   id: string;
   codingSessionId: string;
@@ -532,6 +544,86 @@ export class Spine {
     return rows.map(rowToRun);
   }
 
+  /** Whether the session's CURRENT (latest) run is parked awaiting approval or
+   *  subwork — the state in which a new message must be queued, not appended (the
+   *  last turn is a deliberately dangling tool_use). Deliberately latest-run, not
+   *  any-run: a legacy DB can hold an old abandoned `suspended` row from before
+   *  queueing existed, and matching it would park an idle session's messages
+   *  forever (same semantics as deriveSessionStatus below). */
+  sessionSuspended(sessionKey: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT status FROM runs WHERE session_key = ? ORDER BY started_at DESC, rowid DESC LIMIT 1`,
+      )
+      .get(sessionKey) as { status: string } | undefined;
+    return row?.status === "suspended";
+  }
+
+  // ── queued messages (parked while the session's run was suspended) ──────────
+  enqueueQueuedMessage(q: {
+    sessionKey: string;
+    agentId: string;
+    text: string;
+    source?: RunSource;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO queued_messages (session_key, agent_id, text, source, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(q.sessionKey, q.agentId, q.text, q.source ? json(q.source) : null, nowIso());
+  }
+
+  /** The oldest parked message for a session (FIFO head), if any. */
+  nextQueuedMessage(sessionKey: string): QueuedMessage | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM queued_messages WHERE session_key = ? ORDER BY id ASC LIMIT 1`)
+      .get(sessionKey) as Record<string, unknown> | undefined;
+    return row ? rowToQueuedMessage(row) : undefined;
+  }
+
+  deleteQueuedMessage(id: number): void {
+    this.db.prepare(`DELETE FROM queued_messages WHERE id = ?`).run(id);
+  }
+
+  /** Consume a parked message: delete its row and append it to the session
+   *  transcript in ONE transaction — a crash between the two can neither lose the
+   *  message (delete-first) nor double-deliver it (append-first). After this the
+   *  message is durably part of the conversation even if the delivering run dies
+   *  before starting (the same guarantee an ordinary wake's append gives). */
+  consumeQueuedMessage(q: QueuedMessage): void {
+    const tx = this.db.transaction(() => {
+      this.deleteQueuedMessage(q.id);
+      this.appendMessage(q.sessionKey, "user", [{ type: "text", text: q.text }]);
+    });
+    tx();
+  }
+
+  /** Sessions with parked messages — recovery drains the ones no longer suspended. */
+  queuedMessageSessions(): string[] {
+    const rows = this.db
+      .prepare(`SELECT DISTINCT session_key AS sk FROM queued_messages`)
+      .all() as Array<{ sk: string }>;
+    return rows.map((r) => r.sk);
+  }
+
+  /** Whether a fire from this trigger is already parked for the session — the
+   *  coalesce guard for a recurring trigger firing while its session is parked.
+   *  Keyed on the trigger id, not the rendered text: watch fires embed the event
+   *  path in the text, so text equality would let a busy watch flood the queue. */
+  hasQueuedTriggerFire(sessionKey: string, triggerId: string): boolean {
+    return (
+      this.db
+        .prepare(
+          `SELECT 1 FROM queued_messages
+            WHERE session_key = ? AND source IS NOT NULL
+              AND json_extract(source, '$.triggerId') = ?
+            LIMIT 1`,
+        )
+        .get(sessionKey, triggerId) !== undefined
+    );
+  }
+
   // ── steps (the durable unit of progress) ───────────────────────────────────
   beginStep(runId: string, index: number): void {
     // INSERT OR REPLACE so re-driving a step left pending by a crash is
@@ -905,6 +997,26 @@ export class Spine {
     return rows.map(rowToCodingSession);
   }
 
+  /** Sessions still marked live (running/awaiting_decision) — the crash-orphan set
+   *  boot recovery must flip, without scanning the unbounded terminal history. */
+  listNonTerminalCodingSessions(): CodingSessionRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM coding_sessions WHERE status IN ('running', 'awaiting_decision')`,
+      )
+      .all() as Array<Record<string, unknown>>;
+    return rows.map(rowToCodingSession);
+  }
+
+  /** Every session linked to this spawning run (a run can start one session per
+   *  subwork tool_use over its lifetime). */
+  listCodingSessionsBySpawningRun(runId: string): CodingSessionRecord[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM coding_sessions WHERE spawning_run_id = ?`)
+      .all(runId) as Array<Record<string, unknown>>;
+    return rows.map(rowToCodingSession);
+  }
+
   // ── coding approvals ──────────────────────────────────────────────────────
   createCodingApproval(rec: {
     id: string;
@@ -1075,6 +1187,17 @@ function rowToStep(row: StepRow): Step {
     usage: parse<Usage>(row.usage),
     startedAt: row.started_at,
     committedAt: row.committed_at ?? undefined,
+  };
+}
+
+function rowToQueuedMessage(row: Record<string, unknown>): QueuedMessage {
+  return {
+    id: row.id as number,
+    sessionKey: row.session_key as string,
+    agentId: row.agent_id as string,
+    text: row.text as string,
+    source: parse<RunSource>(row.source as string | null),
+    createdAt: row.created_at as string,
   };
 }
 

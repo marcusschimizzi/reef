@@ -97,6 +97,10 @@ export class CodingSessionManager {
   private readonly idleMs: number;
   private readonly startupMs: number;
   private readonly proactiveApprovalTimeoutMs: number;
+  /** Set by close(): the shutdown already recorded each session's terminal status,
+   *  so a straggling PTY exit handler must not re-record (e.g. `failed` over the
+   *  shutdown's `process_lost`). */
+  private closed = false;
   constructor(private readonly deps: CodingSessionManagerDeps) {
     this.idleMs = deps.idleMs ?? (Number(process.env.REEF_CODING_IDLE_MS) || 300_000);
     this.startupMs = deps.startupMs ?? (Number(process.env.REEF_CODING_STARTUP_MS) || 60_000);
@@ -230,6 +234,7 @@ export class CodingSessionManager {
       for (const ev of processor.push(chunk)) this.onDriverEvent(id, ev);
     });
     handle.onExit((code) => {
+      if (this.closed) return; // shutdown already recorded the status + closed the trace
       trace.write({ type: "lifecycle", event: "exit", code });
       if (this.handingBack.delete(id)) {
         // Deliberate handback: the PTY has now exited and the transcript is flushed,
@@ -291,15 +296,25 @@ export class CodingSessionManager {
     this.live.get(id)!.handle.kill();
   }
 
-  /** Shut down: kill every live session, mark it cancelled, and close its trace.
-   *  Called on daemon shutdown so no PTY or trace fd is leaked. Idempotent trace
-   *  close means the async exit handler firing afterward is harmless. */
+  /** Shut down: kill every live session, mark it process_lost, and close its trace.
+   *  Called on daemon shutdown so no PTY or trace fd is leaked. `process_lost` (not
+   *  `cancelled`): nobody cancelled the work — the daemon is going down. It keeps the
+   *  session revivable via --resume and lets recovery resume the stranded spawning
+   *  run on the next boot, exactly like the crash path. The `closed` latch makes a
+   *  late exit handler a no-op so it can't overwrite the recorded status — which is
+   *  also why the trace's end-of-life record is written HERE (the latched handler
+   *  no longer writes its exit record). */
   close(): void {
+    this.closed = true;
     for (const [id, l] of this.live) {
       this.disarmIdle(id);
       this.clearWatch(id);
-      this.cancelling.add(id);
-      this.deps.spine.setCodingSessionStatus(id, "cancelled");
+      l.trace.write({ type: "lifecycle", event: "shutdown" });
+      this.deps.spine.setCodingSessionStatus(
+        id,
+        "process_lost",
+        interruptedSessionDiag(id, "a daemon shutdown — its process was stopped"),
+      );
       l.handle.kill();
       l.trace.close();
     }
@@ -544,6 +559,16 @@ export class CodingSessionManager {
   private emitCoding(id: string, body: { type: string } & Record<string, unknown>): void {
     this.deps.emit({ ...body, sessionKey: `coding:${id}`, runId: "" } as Parameters<EmitFn>[0]);
   }
+}
+
+/** The revive instruction recorded on a session whose process reef lost (crash,
+ *  restart, shutdown) — one template shared by the shutdown and boot-recovery
+ *  paths so the agent-facing send_feedback call syntax never drifts. */
+export function interruptedSessionDiag(id: string, cause: string): string {
+  return (
+    `The coding session (${id}) was interrupted by ${cause}. It can be revived ` +
+    `from where it left off with send_feedback("${id}", "<how to continue>").`
+  );
 }
 
 /** Expand a leading `~`/`~/` to the home dir and resolve to an absolute path.

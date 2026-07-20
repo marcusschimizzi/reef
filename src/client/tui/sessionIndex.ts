@@ -45,6 +45,10 @@ export function indexEvent(index: SessionIndex, event: ReefEvent): SessionIndex 
         status: "working",
         lastActivityAt: at,
       });
+    case "message.queued":
+      // A send parked behind a suspended run — surface it in the list so the
+      // message doesn't look dropped while it waits.
+      return put(index, { ...prev, preview: `queued: ${event.text}`, lastActivityAt: at });
     case "session.model.changed":
       // a `/model` switch — reflect the new model in the list/header immediately
       return put(index, { ...prev, model: event.model });

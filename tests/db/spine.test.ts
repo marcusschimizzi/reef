@@ -256,6 +256,44 @@ describe("Spine", () => {
     spine.close();
   });
 
+  it("consumeQueuedMessage removes the row and appends the user message in one act", () => {
+    const spine = new Spine(tempDbPath());
+    spine.upsertAgent(agent);
+    spine.ensureSession("s1", agent.id);
+    spine.enqueueQueuedMessage({ sessionKey: "s1", agentId: agent.id, text: "parked hello" });
+    const q = spine.nextQueuedMessage("s1")!;
+
+    spine.consumeQueuedMessage(q);
+
+    expect(spine.nextQueuedMessage("s1")).toBeUndefined();
+    const messages = spine.getMessages("s1");
+    expect(messages.at(-1)).toMatchObject({
+      role: "user",
+      content: [{ type: "text", text: "parked hello" }],
+    });
+    spine.close();
+  });
+
+  it("hasQueuedTriggerFire coalesces parked fires by trigger id, not exact text", () => {
+    const spine = new Spine(tempDbPath());
+    spine.upsertAgent(agent);
+    spine.ensureSession("s1", agent.id);
+    // Two watch fires from the SAME trigger differ in text (the event path is
+    // embedded) — they must still coalesce, or a busy watch floods the queue.
+    spine.enqueueQueuedMessage({
+      sessionKey: "s1",
+      agentId: agent.id,
+      text: "check\n\nfile event: change at /a.txt",
+      source: { kind: "trigger", triggerId: "trg_1", triggerType: "watch" },
+    });
+    expect(spine.hasQueuedTriggerFire("s1", "trg_1")).toBe(true);
+    expect(spine.hasQueuedTriggerFire("s1", "trg_2")).toBe(false);
+    // A non-trigger message never matches.
+    spine.enqueueQueuedMessage({ sessionKey: "s1", agentId: agent.id, text: "plain message" });
+    expect(spine.hasQueuedTriggerFire("s1", "trg_2")).toBe(false);
+    spine.close();
+  });
+
   it("a subwork-suspended run shows as working, not awaiting_approval", () => {
     const spine = new Spine(tempDbPath());
     spine.upsertAgent(agent);

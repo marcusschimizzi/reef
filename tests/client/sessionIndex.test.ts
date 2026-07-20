@@ -24,6 +24,13 @@ const summary = (over: Partial<SessionSummary> & { sessionKey: string }): Sessio
 });
 
 describe("sessionIndex", () => {
+  it("message.queued bumps activity and shows a queued preview so the send is visible in the list", () => {
+    let idx = seedSessions(emptyIndex, [summary({ sessionKey: "s1", lastActivityAt: "2026-06-10T00:00:00Z" })]);
+    idx = indexEvent(idx, ev({ type: "message.queued", sessionKey: "s1", text: "also, use bun please" }));
+    expect(idx.s1?.lastActivityAt).toBe(new Date(Date.parse("2026-06-11T12:00:00Z")).toISOString());
+    expect(idx.s1?.preview).toContain("also, use bun please");
+  });
+
   it("seeds from a snapshot and lets later snapshots win for title/preview", () => {
     let idx = seedSessions(emptyIndex, [summary({ sessionKey: "s1", title: "first" })]);
     expect(idx.s1?.title).toBe("first");

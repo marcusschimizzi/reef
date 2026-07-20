@@ -416,7 +416,7 @@ describe("Daemon coding-session control", () => {
     expect(cs.status).toBe("running");
 
     // ── simulate a CRASH: drop the db connection without a clean shutdown, so the
-    //    coding session stays `running` (close() would mark it cancelled) ──
+    //    coding session stays `running` (close() would mark it process_lost) ──
     d1.spine.close();
 
     // ── daemon 2 on the same db has an empty live map → recover() must reconcile ──
@@ -446,6 +446,252 @@ describe("Daemon coding-session control", () => {
     const toolMsg = d2.spine.getMessages("s1").find((m) => m.role === "tool");
     expect(toolMsg?.content[0]).toMatchObject({ isError: true });
     d2.close();
+  });
+
+  it("a message to a session parked awaiting_subwork is queued, not appended — and delivers after the run resumes", async () => {
+    const dir = tmp();
+    const workDir = tmp();
+    const driver = new FakeDriver();
+    const daemon = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      codingTraceDir: join(dir, "traces"),
+      codingWatchHandbackFile: (_f: string, _on: () => void) => () => {},
+      router: new FakeRouter([
+        { stop: "tool_use", content: [{ type: "tool_use", id: "tool_1", name: "start_coding_session", input: { directory: workDir, task: "go" } }], usage: { inputTokens: 5, outputTokens: 2 } },
+        { stop: "completed", content: [{ type: "text", text: "subwork done, continuing" }], usage: { inputTokens: 8, outputTokens: 2 } },
+        { stop: "completed", content: [{ type: "text", text: "answering your queued message" }], usage: { inputTokens: 4, outputTokens: 2 } },
+      ]),
+      policy: new AllowPolicy(),
+      codingDriver: driver,
+    });
+    daemon.registerAgent(agent);
+
+    await daemon.submit({ sessionKey: "s1", agentId: "reef", message: "do the work" });
+    const run = daemon.listRuns({}).find((r) => r.sessionKey === "s1")!;
+    expect(run.stopReason).toBe("awaiting_subwork");
+
+    // Chat with the session while it's parked. The suspended turn's last message is
+    // a deliberately dangling tool_use awaiting its tool_result — appending a user
+    // message there makes every later model call 400, poisoning the session forever.
+    await daemon.submit({ sessionKey: "s1", agentId: "reef", message: "also, use bun please" });
+    expect(daemon.listRuns({}).filter((r) => r.sessionKey === "s1")).toHaveLength(1);
+    expect(JSON.stringify(daemon.spine.getMessages("s1"))).not.toContain("use bun");
+
+    // Subwork completes → the parked run resumes and finishes → the queued message
+    // is delivered as its own run afterwards.
+    const queuedRunDone = new Promise<void>((resolve) => {
+      const off = daemon.subscribe((e: ReefEvent) => {
+        if (e.type === "run.completed" && e.sessionKey === "s1" && e.runId !== run.id) { off(); resolve(); }
+      });
+    });
+    driver.handle.die(0);
+    await queuedRunDone;
+
+    const runs = daemon.listRuns({}).filter((r) => r.sessionKey === "s1");
+    expect(runs).toHaveLength(2);
+    expect(runs.every((r) => r.status === "completed")).toBe(true);
+    // The transcript stays provider-valid: every tool_use is answered by the
+    // immediately following tool message, and the queued text lands after it.
+    const messages = daemon.spine.getMessages("s1");
+    for (let i = 0; i < messages.length; i++) {
+      if (messages[i]!.role === "assistant" && messages[i]!.content.some((b) => b.type === "tool_use")) {
+        expect(messages[i + 1]?.role).toBe("tool");
+      }
+    }
+    const bunIdx = messages.findIndex((m) => JSON.stringify(m.content).includes("use bun"));
+    const toolIdx = messages.findIndex((m) => m.role === "tool");
+    expect(bunIdx).toBeGreaterThan(toolIdx);
+    daemon.close();
+  });
+
+  it("a queued message survives a restart and delivers after recovery resumes the stranded run", async () => {
+    const dir = tmp();
+    const workDir = tmp();
+    const noopWatch = (_f: string, _on: () => void) => () => {};
+
+    // ── daemon 1: park awaiting_subwork, then a message arrives (queued) ──
+    const d1 = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      codingTraceDir: join(dir, "traces"),
+      codingWatchHandbackFile: noopWatch,
+      router: new FakeRouter([
+        { stop: "tool_use", content: [{ type: "tool_use", id: "tool_1", name: "start_coding_session", input: { directory: workDir, task: "go" } }], usage: { inputTokens: 5, outputTokens: 2 } },
+      ]),
+      policy: new AllowPolicy(),
+      codingDriver: new FakeDriver(),
+    });
+    d1.registerAgent(agent);
+    await d1.submit({ sessionKey: "s1", agentId: "reef", message: "do the work" });
+    await d1.submit({ sessionKey: "s1", agentId: "reef", message: "remember to run the tests" });
+    d1.close();
+
+    // ── daemon 2: recovery resumes the stranded run, then delivers the parked message ──
+    const d2 = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      codingTraceDir: join(dir, "traces"),
+      codingWatchHandbackFile: noopWatch,
+      router: new FakeRouter([
+        { stop: "completed", content: [{ type: "text", text: "the session was interrupted; reporting back" }], usage: { inputTokens: 4, outputTokens: 2 } },
+        { stop: "completed", content: [{ type: "text", text: "on it — running the tests" }], usage: { inputTokens: 4, outputTokens: 2 } },
+      ]),
+      policy: new AllowPolicy(),
+      codingDriver: new FakeDriver(),
+    });
+    d2.registerAgent(agent);
+    await d2.recover();
+    // The delivery job rides the serial inbox; a marker submit drains behind it.
+    // (Its own run rejects — the router is out of turns — which is expected.)
+    await d2.submit({ sessionKey: "marker", agentId: "reef", message: "drain" }).catch(() => undefined);
+
+    const runs = d2.listRuns({}).filter((r) => r.sessionKey === "s1");
+    expect(runs).toHaveLength(2);
+    expect(runs.every((r) => r.status === "completed")).toBe(true);
+    expect(JSON.stringify(d2.spine.getMessages("s1"))).toContain("remember to run the tests");
+    d2.close();
+  });
+
+  it("a trigger fire parked behind a suspended run is dropped at delivery if the trigger was disabled meanwhile", async () => {
+    const dir = tmp();
+    const workDir = tmp();
+    const driver = new FakeDriver();
+    const daemon = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      codingTraceDir: join(dir, "traces"),
+      codingWatchHandbackFile: (_f: string, _on: () => void) => () => {},
+      router: new FakeRouter([
+        { stop: "tool_use", content: [{ type: "tool_use", id: "tool_1", name: "start_coding_session", input: { directory: workDir, task: "go" } }], usage: { inputTokens: 5, outputTokens: 2 } },
+        { stop: "completed", content: [{ type: "text", text: "subwork done" }], usage: { inputTokens: 8, outputTokens: 2 } },
+        { stop: "completed", content: [{ type: "text", text: "stale fire ran anyway" }], usage: { inputTokens: 4, outputTokens: 2 } },
+      ]),
+      policy: new AllowPolicy(),
+      codingDriver: driver,
+    });
+    daemon.registerAgent(agent);
+
+    const t0 = Date.now();
+    const trigger = daemon.createTrigger({
+      agentId: "reef",
+      spec: { kind: "interval", seconds: 1 },
+      input: "check the reef",
+    });
+    await daemon.tickTriggers(new Date(t0 + 1100)); // fire 1 → run parks awaiting_subwork
+    const run = daemon.listRuns({}).find((r) => r.sessionKey === trigger.sessionKey)!;
+    expect(run.stopReason).toBe("awaiting_subwork");
+    await daemon.tickTriggers(new Date(t0 + 2600)); // fire 2 → parked behind the suspended run
+    expect(daemon.spine.nextQueuedMessage(trigger.sessionKey)).toBeDefined();
+
+    // The operator turns the trigger off while its fire is parked.
+    daemon.setTriggerEnabled(trigger.id, false);
+
+    const completed = whenRunCompletes(daemon, run.id);
+    driver.handle.die(0);
+    await completed;
+    await daemon.submit({ sessionKey: "marker", agentId: "reef", message: "drain" }).catch(() => undefined);
+
+    // The parked fire is dropped, not executed: a disabled trigger must not run.
+    expect(daemon.listRuns({}).filter((r) => r.sessionKey === trigger.sessionKey)).toHaveLength(1);
+    expect(daemon.spine.nextQueuedMessage(trigger.sessionKey)).toBeUndefined();
+    daemon.close();
+  });
+
+  it("cancel() delivers messages parked behind the run it settles", async () => {
+    const { daemon } = setup();
+
+    await daemon.submit({ sessionKey: "s1", agentId: "reef", message: "do the work" });
+    const run = daemon.listRuns({}).find((r) => r.sessionKey === "s1")!;
+    expect(run.stopReason).toBe("awaiting_subwork");
+    await daemon.submit({ sessionKey: "s1", agentId: "reef", message: "while you're at it" }); // parked
+
+    // cancel() finalizes the suspended run inline — a settle path with no runLoop
+    // and (if the PTY exit event never arrives) no resume job. The parked message
+    // must still be delivered rather than starving until an unrelated wake.
+    daemon.cancel("s1");
+    await daemon.submit({ sessionKey: "marker", agentId: "reef", message: "drain" }).catch(() => undefined);
+
+    expect(daemon.spine.nextQueuedMessage("s1")).toBeUndefined();
+    const runs = daemon.listRuns({}).filter((r) => r.sessionKey === "s1");
+    expect(runs).toHaveLength(2);
+    expect(JSON.stringify(daemon.spine.getMessages("s1"))).toContain("while you're at it");
+    daemon.close();
+  });
+
+  it("clean shutdown mid-subwork: the session survives as process_lost and the stranded run resumes on recovery", async () => {
+    const dir = tmp();
+    const workDir = tmp();
+    const noopWatch = (_f: string, _on: () => void) => () => {};
+
+    // ── daemon 1 reaches awaiting_subwork with a running coding session ──
+    const d1 = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      codingTraceDir: join(dir, "traces"),
+      codingWatchHandbackFile: noopWatch,
+      router: new FakeRouter([
+        { stop: "tool_use", content: [{ type: "tool_use", id: "tool_1", name: "start_coding_session", input: { directory: workDir, task: "go" } }], usage: { inputTokens: 5, outputTokens: 2 } },
+      ]),
+      policy: new AllowPolicy(),
+      codingDriver: new FakeDriver(),
+    });
+    d1.registerAgent(agent);
+    await d1.submit({ sessionKey: "s1", agentId: "reef", message: "do the work" });
+    const run = d1.listRuns({}).find((r) => r.sessionKey === "s1")!;
+    expect(run.stopReason).toBe("awaiting_subwork");
+    const cs = d1.spine.findCodingSessionBySubwork(run.id, "tool_1")!;
+    expect(cs.status).toBe("running");
+
+    // ── CLEAN shutdown (not a crash): close() kills the PTY. The session must be
+    //    recorded process_lost (revivable via --resume), not a dead-end status the
+    //    recovery pass ignores — otherwise the spawning run hangs forever. ──
+    d1.close();
+
+    // ── daemon 2 on the same db: recovery must resume the stranded run ──
+    const d2 = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      codingTraceDir: join(dir, "traces"),
+      codingWatchHandbackFile: noopWatch,
+      router: new FakeRouter([
+        { stop: "completed", content: [{ type: "text", text: "the coding session was interrupted; reporting back" }], usage: { inputTokens: 4, outputTokens: 2 } },
+      ]),
+      policy: new AllowPolicy(),
+      codingDriver: new FakeDriver(),
+    });
+    d2.registerAgent(agent);
+    await d2.recover();
+
+    expect(d2.spine.getCodingSession(cs.id)!.status).toBe("process_lost");
+    expect(d2.spine.getRun(run.id)!.status).toBe("completed");
+    const toolMsg = d2.spine.getMessages("s1").find((m) => m.role === "tool");
+    expect(toolMsg?.content[0]).toMatchObject({ isError: true });
+    d2.close();
+  });
+
+  it("cancelCodingSession on an agent-spawned session resumes the run with an isError result instead of re-parking it", async () => {
+    const { daemon, driver } = setup();
+
+    await daemon.submit({ sessionKey: "s1", agentId: "reef", message: "do the work" });
+    const run = daemon.listRuns({}).find((r) => r.sessionKey === "s1")!;
+    expect(run.stopReason).toBe("awaiting_subwork");
+    const cs = daemon.spine.findCodingSessionBySubwork(run.id, "tool_1")!;
+
+    // Operator cancels the SESSION directly (socket coding_cancel path) — unlike
+    // daemon.cancel(sessionKey), nothing pre-finalizes the spawning run, so the
+    // post-kill resume must collect a `cancelled` result rather than re-park.
+    const settled = whenRunSettles(daemon, run.id);
+    daemon.cancelCodingSession(cs.id);
+    driver.handle.die(143); // the kill exits the PTY
+    await settled;
+
+    expect(daemon.spine.getCodingSession(cs.id)!.status).toBe("cancelled");
+    const after = daemon.spine.getRun(run.id)!;
+    expect(after.status).toBe("completed");
+    const toolMsg = daemon.spine.getMessages("s1").find((m) => m.role === "tool");
+    expect(toolMsg?.content[0]).toMatchObject({ isError: true });
+    daemon.close();
   });
 
   it("cancel propagates to a coding session spawned by a suspended run", async () => {
