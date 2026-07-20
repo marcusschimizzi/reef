@@ -221,6 +221,24 @@ describe("Daemon", () => {
     daemon.close();
   });
 
+  it("submit() racing shutdown rejects — a dropped message must not look delivered", async () => {
+    const dir = tempDir();
+    const daemon = new Daemon({
+      dbPath: join(dir, "reef.db"),
+      workspaceDir: join(dir, "ws"),
+      router: new FakeRouter([]),
+    });
+    daemon.registerAgent(agent);
+    daemon.close();
+
+    // The job is skipped by the shutdown guard — but the submit() promise is the
+    // sender's only receipt for a message that was neither run nor parked, so it
+    // must reject (the socket/HTTP layer reports it; the client retries later).
+    await expect(
+      daemon.submit({ sessionKey: "s1", agentId: "reef", message: "hi" }),
+    ).rejects.toThrow(/shutting down/);
+  });
+
   it("delivers parked messages in arrival order — a fresh message must not overtake older parked ones", async () => {
     const dir = tempDir();
     const gatedAgent: AgentRecord = { ...agent, toolAllowlist: ["shell"] };

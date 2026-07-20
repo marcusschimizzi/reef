@@ -1,7 +1,10 @@
 import http from "node:http";
 import type { Daemon } from "../daemon/Daemon.js";
+import { consoleLogger } from "../daemon/log.js";
 import type { RunStatus, TriggerSpec } from "../core/types.js";
 import { ConchProjector } from "./adapters/conch.js";
+
+const log = consoleLogger();
 
 // Reef's HTTP + SSE interface — the front door consumers like conch attach to
 // (the dev CLI keeps using the unix socket). Control is plain JSON over POST;
@@ -97,8 +100,16 @@ async function handle(
       return sendJson(res, 400, { ok: false, error: "sessionKey and message required" });
     }
     const agentId = str(body.agentId) || opts.defaultAgentId;
-    // fire-and-forget: progress + errors arrive on the SSE stream
-    void daemon.submit({ sessionKey, agentId, message });
+    // fire-and-forget: progress + errors arrive on the SSE stream. A submit that
+    // races daemon shutdown REJECTS (the message was not accepted) — the 202 was
+    // already optimistic, so log the drop instead of letting the unawaited
+    // rejection crash; the dying SSE stream is the client's shutdown signal.
+    daemon.submit({ sessionKey, agentId, message }).catch((err: unknown) => {
+      log.log("warn", "http submit dropped", {
+        sessionKey,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
     return sendJson(res, 202, { ok: true });
   }
 

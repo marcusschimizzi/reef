@@ -721,7 +721,18 @@ export class Daemon {
   }
 
   private async processJob(job: Job): Promise<void> {
-    if (this.closed) return; // shutdown closed the spine — parked work waits for recovery
+    if (this.closed) {
+      // Shutdown. Void-enqueued work (resume/queued/trigger) is recoverable from
+      // durable state on the next boot — swallow it; a throw here would only be
+      // an unhandled rejection. A message job is different: its submit() promise
+      // is the sender's ONLY receipt, and the message was neither run nor parked
+      // — resolving would report a silently-dropped message as delivered. Reject
+      // so the socket/HTTP layer tells the client to retry after the restart.
+      if (job.kind === "message") {
+        throw new Error("the daemon is shutting down — the message was not accepted; retry after restart");
+      }
+      return;
+    }
     if (job.kind === "message") return this.processWake(job.wake);
     if (job.kind === "trigger") return this.processTrigger(job.triggerId, job.event);
     if (job.kind === "queued") return this.processQueued(job.sessionKey);
